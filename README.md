@@ -1,118 +1,137 @@
-# DataForge 数据加工与知识资产平台
+<div align="center">
 
-![DataForge：从源文档到可追溯知识资产](docs/assets/dataforge-hero.png)
+# DataForge
 
-DataForge 以 [OpenDCAI DataFlow](https://github.com/OpenDCAI/DataFlow) 为数据处理引擎，面向不熟悉数据工程的业务人员提供简洁的文档加工流程，并为技术人员保留标准流程配置和调试能力。
+**A configuration-driven platform for turning documents into traceable knowledge assets and published AI application configurations.**
+
+[简体中文](README.zh-CN.md) · [Documentation](#documentation) · [Architecture](#architecture) · [Quick start](#quick-start)
+
+![Python 3.11–3.12](https://img.shields.io/badge/Python-3.11%E2%80%933.12-3776AB?logo=python&logoColor=white)
+![Vue 3](https://img.shields.io/badge/Vue-3-42b883?logo=vuedotjs&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-OpenAPI-009688?logo=fastapi&logoColor=white)
+![OpenDCAI DataFlow](https://img.shields.io/badge/Engine-OpenDCAI%20DataFlow-6C63FF)
+![Milvus](https://img.shields.io/badge/Vector%20Store-Milvus-00A1EA)
+![Status](https://img.shields.io/badge/Status-Alpha-F59E0B)
+
+</div>
+
+![DataForge knowledge production pipeline](docs/assets/dataforge-hero.png)
+
+DataForge sits between raw enterprise data and AI applications. It provides a visual workspace for defining knowledge schemas, composing and validating DataFlow pipelines, producing versioned knowledge assets, building vector indexes, tuning retrieval, and publishing stable application configurations.
+
+The project is designed for teams that want application code to remain stable while knowledge sources, retrieval policies, prompts, and model endpoints evolve through configuration.
 
 > [!IMPORTANT]
-> DataForge 目前处于持续开发阶段，现有版本主要用于验证核心流程和界面方案，并非生产就绪版本。部分页面和接口仍在调整，向量索引、知识集合、统一检索、权限管理等模块尚待开发。
+> DataForge is under active development and should currently be treated as an alpha release. The core document-to-RAG path is functional; production hardening, access control, evaluation, and large-scale workload support are still evolving.
 
-## 项目目标
+## Why DataForge
 
-平台希望建立一条完整且可追溯的数据链路：
+- **Configuration first** — schemas, pipelines, index projections, retrieval policies, prompts, and model resources are managed in the console.
+- **Traceable by design** — source versions, processing runs, knowledge records, physical indexes, collections, and published configurations remain linked.
+- **DataFlow-native processing** — DataForge wraps [OpenDCAI DataFlow](https://github.com/OpenDCAI/DataFlow) operators and pipelines with validation, versioning, and publishing semantics.
+- **Pluggable AI runtime** — connect OpenAI-compatible LLM, Embedding, and Reranker endpoints without embedding provider-specific code in business applications.
+- **Stable application delivery** — downstream applications consume a stable `app_key` and can follow the current release or pin a historical configuration.
+- **Local-first deployment** — metadata, files, model endpoints, Milvus, and optional graph storage can run inside a private environment.
 
-```text
-PDF / CSV / Markdown / DOCX / TXT
-  → 源文档与不可变版本
-  → 可配置的知识类型
-  → 已发布的 DataFlow 标准流程
-  → 并行加工与逐条格式校验
-  → 关系数据库中的知识资产
-  → 向量或图索引
-  → 知识集合与应用访问
+## Product tour
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/dataforge-overview.jpg" alt="DataForge overview dashboard" />
+      <br /><sub><b>Operations overview</b> — production progress, environment readiness, and the next action in one place.</sub>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/dataforge-application-config.jpg" alt="DataForge application configuration" />
+      <br /><sub><b>Application configuration</b> — bind knowledge, debug RAG behavior, validate, and publish a stable configuration.</sub>
+    </td>
+  </tr>
+</table>
+
+## End-to-end workflow
+
+```mermaid
+flowchart LR
+    A["Documents and structured files"] --> B["Versioned sources"]
+    B --> C["Knowledge schema"]
+    C --> D["DataFlow pipeline"]
+    D --> E["Traceable knowledge assets"]
+    E --> F["Embedding and indexes"]
+    F --> G["Retrieval profile"]
+    G --> H["Published collection"]
+    H --> I["Application configuration"]
+    I --> J["Business applications"]
 ```
 
-业务用户只需要完成“上传文档、选择知识类型、启动处理、查看结果”等操作。知识类型结构、DataFlow 流程、模型服务、索引规则和数据库连接等复杂配置统一放在流程开发区。
+The currently verified reference path uses Text2QA, `bce-embedding-base`, Milvus, configurable retrieval, and an OpenAI-compatible chat model. Model names and endpoints are deployment configuration, not platform assumptions.
 
-## 当前开发状态
+## Core capabilities
 
-| 模块 | 当前状态 | 说明 |
-|---|---|---|
-| 源文档中心 | 基础能力已实现 | 支持 PDF、CSV、Markdown、DOCX、TXT 的上传、解析、版本管理和重复内容识别 |
-| 动态知识类型 | 基础能力已实现 | 支持配置知识类型及字段结构，仍需继续完善版本治理和页面体验 |
-| 标准流程 | 开发中 | 已具备流程登记、类型绑定、验证和默认流程基础能力，正在完善 DataFlow 调试与发布闭环 |
-| 知识生产 | 原型已实现 | 支持多文档任务、结构校验和知识库写入，任务进度、失败恢复和大数据量处理仍需增强 |
-| 知识资产 | 原型已实现 | 可以查看知识库和标准记录，列表、筛选、批量操作和大规模数据浏览仍需优化 |
-| 记录级溯源 | 原型已实现 | 已建立知识记录到源版本的关联，PDF 页码、字符范围和分块对照仍需持续完善 |
-| DataFlow 调试台 | 集成开发中 | 暂时纳入原 DataFlow 工作台，后续收敛为算子编排、样本调试、验证和发布所需功能 |
-| 向量与图索引 | 待开发 | 将提供向量模型、向量库、图数据库、索引方案、异步批处理、重试和版本切换 |
-| 知识集合与应用交付 | 待开发 | 将支持同类型、索引兼容知识库的版本化集合与稳定调用标识 |
-| 统一检索服务 | 待开发 | 将提供文本、FAQ、图谱及混合检索和引用上下文组装 |
-| 登录与权限 | 暂不开发 | 当前优先完成数据生产主流程，后续再设计用户、角色和租户能力 |
+| Area | Capabilities |
+|---|---|
+| Source management | Content hashing, immutable versions, duplicate detection, preview, download, and source metadata |
+| Parsing | PDF, CSV, XLSX, Markdown, DOCX, TXT, JSON, and JSONL |
+| Knowledge schemas | Versioned output contracts for text chunks, FAQ records, knowledge triples, and multi-turn conversations |
+| Pipeline governance | DataFlow operator composition, sample execution, compatibility checks, immutable snapshots, validation, publishing, and default-version switching |
+| Knowledge production | Multi-document jobs, per-document state, cancellation, retry, recovery after restart, schema validation, and transactional publication |
+| Lineage | Source version, processing run, PDF page, CSV/XLSX row, DOCX paragraph or table row, and character ranges |
+| Indexing | Configurable embedding text, stored fields, metadata, scalar filters, Milvus indexes, optional Neo4j targets, batching, checkpoints, and rebuilds |
+| Retrieval | Top K, score threshold, filters, optional reranking, selected return fields, context templates, citations, and audit details |
+| Delivery | Immutable knowledge collections, current or pinned versions, stable application keys, RAG debugging, prompt configuration, and published runtime contracts |
+| Runtime APIs | Configuration retrieval, authenticated synchronous invocation, SSE streaming, citations, token usage, and execution records |
 
-完整阶段规划参见 [plan.md](plan.md)。
+## Architecture
 
-## 当前可以体验的流程
+![DataForge system architecture](docs/assets/dataforge-architecture.jpg)
 
-1. 在“源文档”上传 PDF、CSV、Markdown、DOCX 或 TXT。
-2. 在“知识生产”选择一个或多个文档版本和目标知识类型。
-3. 系统匹配兼容且已验证的默认标准流程。
-4. 启动任务，等待文档加工、逐条校验和关系数据库入库。
-5. 在“知识资产”中查看知识库和知识记录。
-6. 从知识记录进入溯源视图，查看处理后的内容与源文档位置。
+DataForge separates durable knowledge assets from their projections and consumers:
 
-“知识资产已入库”只表示标准记录已经写入关系数据库，并不表示已经向量化或可以被应用检索。向量库和图数据库索引属于下一阶段建设内容。
+- the **Web Console** manages configuration and operations;
+- the **FastAPI service layer** owns versioning, validation, orchestration, and public contracts;
+- **DataFlow** executes document and model-assisted processing pipelines;
+- **knowledge assets** remain the traceable source of truth;
+- **Milvus** stores vector projections and **Neo4j** is an optional graph target;
+- **retrieval and application configurations** publish stable interfaces to downstream software.
 
-技术人员可以进入“流程开发区 / DataFlow 调试台”配置知识类型、编排流程、运行样本、检查中间结果并发布标准流程。当前调试台仍是过渡实现，部分 DataFlow 原生功能和界面会继续调整。
+The validated diagram source is available in [`dataforge.architecture.json`](dataforge.architecture.json), with an explorable HTML artifact in [`dataforge-architecture.html`](dataforge-architecture.html).
 
-## 已具备的基础能力
+## Quick start
 
-- 文件内容校验和不可变版本管理
-- PDF、CSV、Markdown、DOCX、TXT 解析
-- 可配置知识类型及输出字段
-- 标准流程与知识类型兼容校验
-- 多文档知识生产任务
-- 知识库和知识记录持久化
-- 记录到源文档版本的关联与溯源
-- DataForge 文件版本向 DataFlow 数据集桥接
-- DataFlow 任务结果发布为 DataForge 数据资产
-- 快速处理、预览、下载和基础接口
+### Prerequisites
 
-## 项目结构
-
-```text
-DataForge/
-├── src/dataforge/                 # Python 后端、任务、存储与 DataFlow 桥接
-├── frontend/                      # 面向业务用户的 Vue 中文界面
-├── third_party/dataflow_webui/    # DataFlow 调试台前后端
-├── tests/                         # 核心流程和接口测试
-├── examples/                      # 示例文档与流程
-├── docs/assets/                   # README 等文档资源
-└── plan.md                        # 产品流程与阶段规划
-```
-
-运行数据默认保存在 `.dataforge/`，该目录不会提交到 Git：
-
-```text
-.dataforge/
-├── metadata.sqlite3
-├── blobs/
-├── runs/
-└── dataflow-studio/
-    ├── data/
-    ├── imports/
-    └── cache/
-```
-
-## 安装与运行
-
-环境要求：
-
-- Python 3.11 或 3.12
+- Python 3.11 or 3.12
 - [uv](https://docs.astral.sh/uv/)
-- Node.js 与 npm
-- 本地 DataFlow 源码
+- Node.js and npm
+- Docker with Compose, for local Milvus
+- A local checkout of [OpenDCAI DataFlow](https://github.com/OpenDCAI/DataFlow)
 
-如果 DataFlow 与 DataForge 位于同一个父目录，系统会自动发现；其他目录请设置 `DATAFORGE_DATAFLOW_PATH`。
+### 1. Clone DataFlow and DataForge
+
+Keeping both repositories under the same parent directory enables automatic DataFlow discovery.
 
 ```bash
+git clone https://github.com/OpenDCAI/DataFlow.git
 git clone https://github.com/cheney369/DataForge.git
 cd DataForge
+```
 
-export DATAFORGE_DATAFLOW_PATH=/path/to/DataFlow
+For a different layout, set `DATAFORGE_DATAFLOW_PATH=/absolute/path/to/DataFlow`.
 
-uv sync --extra dataflow --extra web --extra studio
+### 2. Install backend dependencies
 
+```bash
+uv sync --extra dataflow --extra web --extra studio --extra indexing
+```
+
+### 3. Start Milvus
+
+```bash
+docker compose -f infra/milvus/docker-compose.yml up -d
+```
+
+### 4. Build the web interfaces
+
+```bash
 cd frontend
 npm install
 npm run build
@@ -122,43 +141,103 @@ npm install
 npm run build
 
 cd ../../..
-uv run --extra dataflow --extra web --extra studio dataforge-web
 ```
 
-浏览器打开 [http://127.0.0.1:8000](http://127.0.0.1:8000)，接口文档位于 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)。
-
-## 验证
+### 5. Start DataForge
 
 ```bash
-uv run --with pytest --extra dataflow --extra web --extra studio pytest -q
+uv run --extra dataflow --extra web --extra studio --extra indexing dataforge-web
 ```
 
-前端构建：
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000). OpenAPI documentation is available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+## Model and storage configuration
+
+DataForge supports OpenAI-compatible model services. The defaults are local placeholders and can be changed in the console or with environment variables.
 
 ```bash
-cd frontend
-npm run build
+export DATAFORGE_LLM_BASE_URL=http://127.0.0.1:8001/v1
+export DATAFORGE_LLM_MODEL=Qwen3-32B
 
-cd ../third_party/dataflow_webui/frontend
-npm run build
+export DATAFORGE_EMBEDDING_BASE_URL=http://127.0.0.1:8002/v1
+export DATAFORGE_EMBEDDING_MODEL=bce-embedding-base
+export DATAFORGE_EMBEDDING_DIMENSION=768
+
+export DATAFORGE_RERANKER_BASE_URL=http://127.0.0.1:8197/v1
+export DATAFORGE_RERANKER_MODEL=bge-reranker-large
+
+export DATAFORGE_MILVUS_URI=http://127.0.0.1:19530
 ```
 
-## 已知边界
+Secrets are referenced by environment-variable name and are not stored in published configuration snapshots.
 
-- Word 当前只支持 DOCX，旧版 `.doc` 尚未提供格式转换。
-- 扫描版 PDF 尚未接入 OCR，只读取已有文字层。
-- 大型文档产生数万条知识记录时，任务进度、分页和失败恢复能力仍需加强。
-- 向量化、FAQ 索引、三元组图索引和多轮对话索引尚未实现。
-- 当前版本未提供统一检索、知识集合、应用接入和生产级权限体系。
-- 部分 DataFlow 算子依赖本地模型、GPU、音频、OCR 或第三方服务，需自行安装对应可选依赖。
+## Application integration
 
-## 最新更新
+Read the current published configuration with a stable application key:
 
-### 2026-07-30
+```bash
+curl http://127.0.0.1:8000/v1/application-configs/my-assistant
+```
 
-- 重写项目说明，明确业务工作区与流程开发区的职责边界。
-- 增加模块开发状态，区分现有原型、开发中能力和待开发模块。
-- 补充关系库入库、向量或图索引、知识集合与应用访问的阶段规划。
-- 增加 DataForge 数据加工全流程视觉图。
+Invoke a published application:
 
-完整历史参见 [更新记录](docs/releases/release-notes.md)。
+```bash
+curl -X POST http://127.0.0.1:8000/v1/apps/my-assistant/invoke \
+  -H 'Authorization: Bearer <APPLICATION_API_KEY>' \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":{"query":"What does this knowledge base contain?"}}'
+```
+
+Applications can also call a pinned version and request Server-Sent Events. See [AI application publishing and invocation](docs/ai-applications.md) for the full contract.
+
+## Operations and verification
+
+```bash
+# Environment and dependency diagnostics
+uv run dataforge doctor --deep
+
+# HTTP health and readiness smoke test
+uv run dataforge smoke --url http://127.0.0.1:8000
+
+# Backend test suite
+uv run --with pytest --extra dataflow --extra web --extra studio --extra indexing pytest -q
+
+# Main frontend production build
+cd frontend && npm run build
+```
+
+For a single-server deployment template, systemd example, persistence layout, and readiness probes, see [Deployment](infra/deploy/README.md).
+
+## Documentation
+
+- [DataFlow integration and adapter boundaries](docs/dataflow-integration.md)
+- [Indexing and retrieval configuration](docs/indexing-and-retrieval.md)
+- [Knowledge collections and delivery](docs/knowledge-collections-and-delivery.md)
+- [AI application publishing and invocation](docs/ai-applications.md)
+- [Release notes](docs/releases/release-notes.md)
+
+## Current limitations
+
+- Scanned PDFs require an external OCR or MinerU deployment; native parsing reads existing text layers.
+- Legacy `.doc` files are not converted; use `.docx`.
+- Large multi-process workloads still need a durable distributed task queue and broader throughput testing.
+- Hybrid vector/graph retrieval, automated evaluation, rate limiting, quotas, and tool-using agents are not yet complete.
+- Authentication, role-based access control, and multi-tenant isolation are not production-ready.
+
+## Roadmap
+
+- activate MinerU/OCR as an optional structured PDF parser;
+- add database and HTTP API source connectors;
+- expand hybrid vector, keyword, and graph retrieval;
+- provide evaluation datasets, regression checks, and retrieval quality dashboards;
+- add durable workers, scheduling, and larger-scale deployment patterns;
+- publish lightweight Python and JavaScript application clients;
+- complete authentication, authorization, and audit hardening.
+
+## Contributing
+
+Issues and pull requests are welcome. For a significant change, open an issue first and describe the problem, expected behavior, and proposed compatibility impact. Please include tests for backend behavior and run the relevant frontend production build before submitting a pull request.
+
+## License
+
+An open-source license has not yet been selected. Until a `LICENSE` file is added, the repository is available for evaluation and collaboration, but no additional usage rights are granted by default.

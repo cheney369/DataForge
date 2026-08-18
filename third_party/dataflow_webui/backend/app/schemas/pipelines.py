@@ -54,7 +54,11 @@ class PipelineInputDataset(BaseModel):
 
 class PipelineConfig(BaseModel):
     """Pipeline配置模型"""
-    file_path: str = Field(..., description="Pipeline文件路径")
+    # DataForge-created pipelines are registry-backed and do not originate
+    # from a Python pipeline file. Keep the legacy field optional so both
+    # native DataFlow templates and DataForge drafts serialize through the
+    # original WebUI API.
+    file_path: str = Field(default="", description="Pipeline文件路径")
     input_dataset: Union[str, PipelineInputDataset] = Field(..., description="输入数据集ID或配置")
     # 用 list 的顺序代表算子执行顺序
     operators: List[PipelineOperator] = Field(default_factory=list, description="算子执行序列")

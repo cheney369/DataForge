@@ -4,10 +4,13 @@ import { defineStore } from 'pinia'
 
 export const useTheme = defineStore('useTheme', () => {
     const themeColor = ref('rgba(81, 99, 209, 1)');
-    const Theme = ref('light')
+    const Theme = ref('dark')
 
-    function reviseTheme(themeValue) {
-        Theme.value = themeValue;
+    function reviseTheme() {
+        // DataForge embeds this workbench inside a dark glass shell. Keeping the
+        // workbench dark avoids a jarring theme switch when preferences still
+        // contain the upstream default value of "light".
+        Theme.value = 'dark';
     }
 
     const theme = computed(() => Theme.value)

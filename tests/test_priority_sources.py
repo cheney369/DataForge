@@ -6,11 +6,13 @@ import unittest
 from pathlib import Path
 
 from docx import Document
+from openpyxl import Workbook
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from dataforge.application import DataForge
 from dataforge.config import Settings
+from dataforge.ingestion import preview_source_records
 
 
 def write_text_pdf(path: Path, text: str) -> None:
@@ -58,6 +60,15 @@ class PrioritySourceFormatsTest(unittest.TestCase):
         csv_file.write_text("question,answer\n如何预约,通过医院小程序预约\n", encoding="utf-8")
         files.append((csv_file, "通过医院小程序预约"))
 
+        excel_file = self.root / "follow-up.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "随访计划"
+        sheet.append(["患者", "计划"])
+        sheet.append(["张三", "每周测量血压"])
+        workbook.save(excel_file)
+        files.append((excel_file, "每周测量血压"))
+
         word_file = self.root / "report.docx"
         document = Document()
         document.add_heading("出院记录", level=1)
@@ -84,6 +95,53 @@ class PrioritySourceFormatsTest(unittest.TestCase):
                 blob = self.app.blobs.resolve(result.asset_version["blob_uri"])
                 records = [json.loads(line) for line in blob.read_text(encoding="utf-8").splitlines()]
                 self.assertTrue(any(expected_text in item["content"] for item in records))
+
+    def test_pdf_and_docx_preview_include_precise_source_positions(self):
+        pdf_file = self.root / "located.pdf"
+        write_text_pdf(pdf_file, "Follow-up page one")
+        pdf_ingestion = self.app.sources.ingest(pdf_file)
+        pdf_preview = preview_source_records(
+            self.app.blobs.resolve(pdf_ingestion.source_version["blob_uri"]),
+            pdf_ingestion.source_version,
+        )
+        self.assertEqual(pdf_preview["records"][0]["source_locator"]["page_number"], 1)
+
+        word_file = self.root / "located.docx"
+        document = Document()
+        document.add_paragraph("第一段")
+        document.add_paragraph("第二段")
+        document.save(word_file)
+        word_ingestion = self.app.sources.ingest(word_file)
+        word_preview = preview_source_records(
+            self.app.blobs.resolve(word_ingestion.source_version["blob_uri"]),
+            word_ingestion.source_version,
+        )
+        self.assertEqual(
+            [item["source_locator"]["paragraph_index"] for item in word_preview["records"]],
+            [1, 2],
+        )
+
+    def test_xlsx_preview_preserves_sheet_and_row_position(self):
+        excel_file = self.root / "located.xlsx"
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "门诊随访"
+        sheet.append(["姓名", "复诊日期"])
+        sheet.append(["李四", "2026-09-01"])
+        workbook.save(excel_file)
+
+        ingestion = self.app.sources.ingest(excel_file)
+        preview = preview_source_records(
+            self.app.blobs.resolve(ingestion.source_version["blob_uri"]),
+            ingestion.source_version,
+        )
+
+        locator = preview["records"][0]["source_locator"]
+        self.assertEqual(locator["kind"], "xlsx")
+        self.assertEqual(locator["sheet_name"], "门诊随访")
+        self.assertEqual(locator["sheet_index"], 1)
+        self.assertEqual(locator["row_number"], 2)
+        self.assertEqual(locator["header_row_number"], 1)
 
 
 if __name__ == "__main__":

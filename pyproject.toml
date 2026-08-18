@@ -9,6 +9,7 @@ description = "Medical AI data foundation built around OpenDCAI DataFlow"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+  "openpyxl>=3.1,<4",
   "pypdf>=5.9,<7",
   "python-docx>=1.2,<2"
 ]
@@ -34,6 +35,10 @@ studio = [
   "pymysql>=1.1,<2",
   "pyyaml>=6,<7",
   "ray>=2.48,<3"
+]
+indexing = [
+  "pymilvus>=2.6,<3",
+  "neo4j>=5.28,<7"
 ]
 
 [project.scripts]

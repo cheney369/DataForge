@@ -265,20 +265,29 @@ def get_operator_detail_by_name(op_name: str, lang: str = "zh"):
             with open(ops_json_path, "r", encoding="utf-8") as f:
                 ops_data = json.load(f)
 
-        # Look up the operator in all buckets
-        for bucket_name, items in ops_data.items():
-            if not isinstance(items, list):
-                continue
-            for op in items:
-                if not isinstance(op, dict):
+        def find_operator(data):
+            for items in data.values():
+                if not isinstance(items, list):
                     continue
-                if op.get("name") == op_name:
-                    op_copy = dict(op)
-                    agent_tips, field_hint, context_hint = _build_operator_agent_tips(op_copy)
-                    op_copy["agent_tips"] = agent_tips
-                    op_copy["field_binding_hint"] = field_hint
-                    op_copy["mcp_context_hint"] = context_hint
-                    return ok(op_copy)
+                for op in items:
+                    if isinstance(op, dict) and op.get("name") == op_name:
+                        return op
+            return None
+
+        op = find_operator(ops_data)
+        if op is None:
+            # The JSON cache can predate operators registered by the embedding
+            # application. Refresh once so dynamically added operators can be
+            # opened and rendered by the original DataFlow editor.
+            ops_data = container.operator_registry.dump_ops_to_json(lang=lang)
+            op = find_operator(ops_data)
+        if op is not None:
+            op_copy = dict(op)
+            agent_tips, field_hint, context_hint = _build_operator_agent_tips(op_copy)
+            op_copy["agent_tips"] = agent_tips
+            op_copy["field_binding_hint"] = field_hint
+            op_copy["mcp_context_hint"] = context_hint
+            return ok(op_copy)
 
         # Not found
         raise HTTPException(status_code=404, detail=f"Operator '{op_name}' not found")

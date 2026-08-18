@@ -1,4 +1,8 @@
 export default {
+    "Save & Run": {
+        "en": "Save & Run",
+        "cn": "保存并运行"
+    },
     "No any Content": {
         "en": "No any Content",
         "cn": "没有任何内容"

@@ -11,6 +11,7 @@ from .database import MetadataStore, new_id
 from .errors import ValidationError
 from .ingestion import SourceService, materialize_source_records
 from .models import FlowResult
+from .parser_capabilities import ParserCapabilities
 from .processing import create_engine
 
 
@@ -34,7 +35,17 @@ class DataForge:
         self.store.initialize()
         self.blobs = BlobStore(settings.blobs_dir)
         self.sources = SourceService(self.store, self.blobs)
+        self.parser_capabilities = ParserCapabilities(settings)
         self._seed_defaults()
+        from .indexing import IndexingService
+
+        self.indexing = IndexingService(self)
+        from .delivery import DeliveryService
+
+        self.delivery = DeliveryService(self)
+        from .applications import AIApplicationService
+
+        self.applications = AIApplicationService(self)
 
     @classmethod
     def open(
@@ -262,4 +273,25 @@ class DataForge:
             "dataflow_present": bool(
                 self.settings.dataflow_path and (self.settings.dataflow_path / "dataflow").is_dir()
             ),
+            "parsers": self.parser_capabilities.describe(),
+            "indexing": {
+                "llm_services": len(self.indexing.repository.list_llm_services()),
+                "embedding_services": len(self.indexing.repository.list_embedding_services()),
+                "vector_stores": len(self.indexing.repository.list_vector_stores()),
+                "published_profiles": sum(
+                    item["validation_status"] == "validated" and item["active"]
+                    for item in self.indexing.repository.list_index_profiles()
+                ),
+            },
+            "delivery": {
+                "knowledge_collections": len(self.delivery.repository.list_collections()),
+                "application_bindings": len(self.delivery.repository.list_bindings()),
+            },
+            "applications": {
+                "ai_applications": len(self.applications.repository.list_applications()),
+                "published_versions": sum(
+                    item["status"] == "published"
+                    for item in self.applications.repository.list_versions()
+                ),
+            },
         }

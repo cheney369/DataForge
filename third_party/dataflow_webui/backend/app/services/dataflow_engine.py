@@ -231,7 +231,13 @@ class DataFlowEngine:
                         params_dict[params['name']] = params.get('value') if params.get('value') is not None else params.get('default_value')
                 
                 logger.info(f"Initializing serving with params: {params_dict}")
-                os.environ[key_name_var] = api_key_val
+                if api_key_val:
+                    os.environ[key_name_var] = api_key_val
+                elif not os.environ.get(key_name_var):
+                    raise DataFlowEngineError(
+                        "Serving API key environment variable is unavailable",
+                        context={"serving_id": actual_serving_id, "key_name": key_name_var},
+                    )
                 logger.info(f"Environment variable {key_name_var} configured for serving")
                 serving_instance = SERVING_CLS_REGISTRY[serving_info['cls_name']](**params_dict)
                 

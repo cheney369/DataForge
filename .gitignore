@@ -1,5 +1,7 @@
 .venv/
 .dataforge/
+.devora/
+infra/milvus/volumes/
 __pycache__/
 *.py[cod]
 *.egg-info/

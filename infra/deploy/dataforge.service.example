@@ -1,0 +1,22 @@
+[Unit]
+Description=DataForge internal knowledge service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dataforge
+Group=dataforge
+WorkingDirectory=/opt/dataforge
+EnvironmentFile=/etc/dataforge/dataforge.env
+ExecStart=/opt/dataforge/.venv/bin/dataforge-web
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/srv/dataforge
+
+[Install]
+WantedBy=multi-user.target

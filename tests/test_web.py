@@ -79,6 +79,157 @@ class DataForgeWebTest(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["error"], "NotFoundError")
 
+    def test_modular_api_contract_keeps_public_paths(self):
+        paths = set(self.client.get("/openapi.json").json()["paths"])
+        expected = {
+            "/api/health",
+            "/api/liveness",
+            "/api/readiness",
+            "/api/parser-capabilities",
+            "/api/dashboard",
+            "/api/sources",
+            "/api/sources/{source_id}/versions",
+            "/api/source-versions/{source_version_id}/preview",
+            "/api/source-versions/{source_version_id}/download",
+            "/api/knowledge-types",
+            "/api/knowledge-types/{type_id}/versions",
+            "/api/standard-pipelines",
+            "/api/knowledge-jobs",
+            "/api/knowledge-bases",
+            "/api/runs",
+            "/api/assets",
+            "/api/dataflow-studio/status",
+            "/api/dataflow-health",
+            "/api/dataflow-pipelines/{pipeline_id}",
+            "/api/dataflow-tasks/{task_id}",
+            "/api/dataflow-datasets",
+            "/api/dataflow-operators",
+            "/api/dataflow-schemas",
+            "/api/dataflow-servings",
+            "/api/dataflow-text2qa/activate",
+            "/api/dataflow-conversation/configure",
+            "/api/knowledge-jobs/{job_id}/retry",
+            "/api/knowledge-jobs/{job_id}/cancel",
+            "/api/standard-pipelines/{pipeline_id}/deactivate",
+            "/api/embedding-services",
+            "/api/llm-services",
+            "/api/llm-services/{service_id}/test",
+            "/api/embedding-services/{service_id}/test",
+            "/api/reranker-services",
+            "/api/reranker-services/{service_id}/test",
+            "/api/vector-stores",
+            "/api/vector-stores/{store_id}/test",
+            "/api/graph-stores",
+            "/api/index-profiles",
+            "/api/index-profiles/{profile_id}/preview",
+            "/api/index-profiles/{profile_id}/publish",
+            "/api/knowledge-indexes",
+            "/api/index-jobs",
+            "/api/index-jobs/{job_id}/retry",
+            "/api/retrieval-profiles",
+            "/api/retrieval/query",
+            "/api/knowledge-collections",
+            "/api/knowledge-collections/{collection_id}/versions",
+            "/api/collection-versions/{version_id}",
+            "/api/collection-versions/{version_id}/publish",
+            "/api/collection-versions/{version_id}/query",
+            "/api/application-bindings",
+            "/api/application-bindings/{binding_id}/repoint",
+            "/api/application-access/{binding_key}/query",
+            "/api/ai-applications",
+            "/api/ai-applications/{application_id}/versions",
+            "/api/ai-application-versions/{version_id}/publish",
+            "/api/ai-application-versions/{version_id}/preview",
+            "/api/ai-applications/{application_id}/credentials",
+            "/api/ai-application-credentials/{credential_id}/revoke",
+            "/api/ai-application-runs",
+            "/api/ai-applications/{app_key}/chat",
+            "/v1/apps/{app_key}/invoke",
+            "/v1/apps/{app_key}/versions/{version_number}/invoke",
+            "/v1/application-configs/{app_key}",
+            "/v1/application-configs/{app_key}/versions/{version_number}",
+        }
+        self.assertTrue(expected.issubset(paths), expected - paths)
+
+    def test_deployment_endpoints_distinguish_liveness_and_readiness(self):
+        liveness = self.client.get("/api/liveness")
+        readiness = self.client.get("/api/readiness")
+
+        self.assertEqual(liveness.status_code, 200)
+        self.assertEqual(liveness.json()["status"], "alive")
+        self.assertEqual(readiness.status_code, 200)
+        self.assertTrue(readiness.json()["ready"])
+        self.assertEqual(readiness.json()["status"], "degraded")
+        self.assertEqual(
+            {item["id"] for item in readiness.json()["checks"]},
+            {"state", "database", "frontend", "dataflow", "model_storage"},
+        )
+
+    def test_application_serving_requires_bearer_credential(self):
+        response = self.client.post(
+            "/v1/apps/missing-app/invoke",
+            json={"inputs": {"query": "test"}},
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"], "AuthenticationError")
+        self.assertEqual(response.headers["www-authenticate"], "Bearer")
+
+    def test_index_resources_and_projection_are_configurable_through_api(self):
+        resources = self.client.get("/api/embedding-services").json()
+        llms = self.client.get("/api/llm-services").json()
+        rerankers = self.client.get("/api/reranker-services").json()
+        vectors = self.client.get("/api/vector-stores").json()
+        profiles = self.client.get("/api/index-profiles").json()
+
+        self.assertEqual(resources[0]["model"], "bce-embedding-base")
+        self.assertEqual(llms[0]["model"], "Qwen3-32B")
+        self.assertEqual(rerankers[0]["model"], "bge-reranker-large")
+        self.assertEqual(resources[0]["dimension"], 768)
+        self.assertEqual(vectors[0]["kind"], "milvus")
+        self.assertEqual(
+            {item["knowledge_type_id"] for item in profiles},
+            {"text_chunk", "faq", "knowledge_triple", "multi_turn_dialogue"},
+        )
+        faq = next(item for item in profiles if item["knowledge_type_id"] == "faq")
+        preview = self.client.get(f"/api/index-profiles/{faq['id']}/preview")
+        self.assertEqual(preview.status_code, 200)
+        self.assertIn("示例question", preview.json()["indexed_text"])
+        self.assertEqual(
+            set(preview.json()["metadata"]["stored"]), {"question", "answer"}
+        )
+
+    def test_optional_mineru_is_reported_without_blocking_native_parsing(self):
+        capabilities = self.client.get("/api/parser-capabilities").json()
+
+        self.assertTrue(capabilities["native"]["available"])
+        self.assertTrue(capabilities["native"]["in_use"])
+        self.assertFalse(capabilities["mineru"]["in_use"])
+        self.assertIn(capabilities["mineru"]["integration_state"], {"reserved", "disabled"})
+
+    def test_source_versions_can_be_filtered_previewed_and_downloaded(self):
+        payload = "标题：复诊注意事项\n\n请记录每日血压，并在一个月后复诊。"
+        uploaded = self.client.post(
+            "/api/sources",
+            data={"name": "门诊复诊指南", "kind": "medical_document"},
+            files={"file": ("follow-up-guide.md", payload, "text/markdown")},
+        ).json()
+        version_id = uploaded["source_version"]["id"]
+
+        matched = self.client.get("/api/sources", params={"query": "复诊", "kind": "md"})
+        self.assertEqual(matched.status_code, 200)
+        self.assertEqual([source["name"] for source in matched.json()], ["门诊复诊指南"])
+        self.assertEqual(self.client.get("/api/sources", params={"query": "不存在"}).json(), [])
+
+        preview = self.client.get(f"/api/source-versions/{version_id}/preview")
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.json()["preview_record_count"], 1)
+        self.assertIn("每日血压", preview.json()["records"][0]["content"])
+
+        download = self.client.get(f"/api/source-versions/{version_id}/download")
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.content.decode(), payload)
+        self.assertIn("follow-up-guide.md", download.headers["content-disposition"])
+
     def test_knowledge_catalog_filters_compatible_standard_pipelines(self):
         types = self.client.get("/api/knowledge-types")
         self.assertEqual(types.status_code, 200)
@@ -117,6 +268,60 @@ class DataForgeWebTest(unittest.TestCase):
         job = self.client.get(f"/api/knowledge-jobs/{started.json()['id']}").json()
         self.assertEqual(job["standard_pipeline_id"], "std-text-chunk-v1")
         self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["standard_pipeline"]["pipeline_ref"], "medical-document-v1")
+        self.assertEqual(job["standard_pipeline"]["engine"], "dataflow")
+        self.assertEqual(job["sources"][0]["original_filename"], "guide.txt")
+        self.assertEqual(job["executions"][0]["engine"], "native")
+        self.assertGreater(job["executions"][0]["record_count"], 0)
+        self.assertTrue(job["validation"]["passed"])
+        knowledge_base = self.client.get("/api/knowledge-bases").json()[0]
+        self.assertEqual(knowledge_base["index_status"], "unindexed")
+
+    def test_failed_knowledge_job_can_be_retried_through_api(self):
+        uploaded = self.client.post(
+            "/api/sources",
+            files={"file": ("retry.txt", "患者应记录每日血压。", "text/plain")},
+        ).json()
+        store = self.client.app.state.dataforge.store
+        failed = store.create_knowledge_job(
+            "重试接口验证",
+            "text_chunk",
+            "std-text-chunk-v1",
+            [uploaded["source_version"]["id"]],
+        )
+        store.update_knowledge_job(failed["id"], status="failed", error="temporary")
+
+        response = self.client.post(f"/api/knowledge-jobs/{failed['id']}/retry")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["attempt_no"], 2)
+        self.assertEqual(response.json()["retry_of_job_id"], failed["id"])
+        detail = self.client.get(f"/api/knowledge-jobs/{response.json()['id']}").json()
+        self.assertEqual(detail["status"], "completed")
+        duplicate = self.client.post(f"/api/knowledge-jobs/{failed['id']}/retry")
+        self.assertEqual(duplicate.status_code, 400)
+
+    def test_pending_knowledge_job_can_be_cancelled_through_api(self):
+        uploaded = self.client.post(
+            "/api/sources",
+            files={"file": ("cancel.txt", "患者应按计划复诊。", "text/plain")},
+        ).json()
+        store = self.client.app.state.dataforge.store
+        job = store.create_knowledge_job(
+            "取消接口验证",
+            "text_chunk",
+            "std-text-chunk-v1",
+            [uploaded["source_version"]["id"]],
+        )
+
+        response = self.client.post(f"/api/knowledge-jobs/{job['id']}/cancel")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "cancelled")
+        detail = self.client.get(f"/api/knowledge-jobs/{job['id']}").json()
+        self.assertEqual(detail["items"][0]["status"], "cancelled")
+        duplicate = self.client.post(f"/api/knowledge-jobs/{job['id']}/cancel")
+        self.assertEqual(duplicate.status_code, 400)
 
     def test_knowledge_type_can_be_configured_without_frontend_changes(self):
         created = self.client.post(
@@ -138,6 +343,28 @@ class DataForgeWebTest(unittest.TestCase):
             created.json()["id"],
             {item["id"] for item in self.client.get("/api/knowledge-types").json()},
         )
+
+        versioned = self.client.post(
+            f"/api/knowledge-types/{created.json()['id']}/versions",
+            json={
+                "name": "术语知识库",
+                "description": "增加术语分类。",
+                "schema": {
+                    "type": "object",
+                    "required": ["term", "definition", "category"],
+                    "properties": {
+                        "term": "string",
+                        "definition": "string",
+                        "category": "string",
+                    },
+                },
+            },
+        )
+        self.assertEqual(versioned.status_code, 201)
+        self.assertEqual(versioned.json()["version"], 2)
+        types = self.client.get("/api/knowledge-types").json()
+        original = next(item for item in types if item["id"] == created.json()["id"])
+        self.assertFalse(original["active"])
 
     def test_dataflow_studio_frontend_is_mounted_separately(self):
         project_root = Path(__file__).resolve().parents[1]

@@ -1,7 +1,7 @@
 <template>
-    <div class="manage-container" :class="[{ dark: theme === 'dark' }]">
-        <div class="manage-content-block">
-            <fv-navigation-view :theme="theme" v-model="currentNav" :title="''" :options="navList"
+    <div class="manage-container" :class="[{ dark: theme === 'dark', embedded: isEmbedded }]">
+        <div class="manage-content-block" :class="{ embedded: isEmbedded }">
+            <fv-navigation-view v-if="!isEmbedded" :theme="theme" v-model="currentNav" :title="''" :options="navList"
                 v-model:expand="isExpand" :foreground="color"
                 :background="theme === 'dark' ? 'rgba(36, 36, 36, 1)' : ''" expand-width="300" :flyout-display="1368"
                 :mobile-display="1024" class="navigation-view" :show-back="false" :show-search="false"
@@ -51,6 +51,7 @@ import analysis from '@/assets/nav/analysis.svg'
 export default {
     data() {
         return {
+            isEmbedded: new URLSearchParams(window.location.search).get('embedded') === '1' || window.self !== window.top,
             currentNav: {
                 key: 0,
                 name: () => this.local('DataFlow'),
@@ -247,6 +248,15 @@ export default {
                     align-items: center;
                     object-fit: cover;
                 }
+            }
+        }
+
+        &.embedded {
+            min-width: 0;
+
+            > * {
+                min-width: 0;
+                flex: 1;
             }
         }
     }

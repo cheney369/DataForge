@@ -33,7 +33,9 @@ def _decode_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "stats_json",
         "schema_json",
         "payload_json",
+        "detail_json",
         "output_schema_json",
+        "pipeline_snapshot_json",
         "source_version_ids_json",
         "validation_json",
         "source_locator_json",
@@ -153,6 +155,9 @@ CREATE TABLE IF NOT EXISTS knowledge_types (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT NOT NULL,
+    logical_key TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    supersedes_id TEXT REFERENCES knowledge_types(id),
     schema_json TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
@@ -167,6 +172,9 @@ CREATE TABLE IF NOT EXISTS standard_pipelines (
     version INTEGER NOT NULL,
     description TEXT NOT NULL,
     output_schema_json TEXT NOT NULL,
+    pipeline_snapshot_json TEXT NOT NULL DEFAULT '{}',
+    pipeline_hash TEXT,
+    sample_task_id TEXT,
     validation_status TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
     is_default INTEGER NOT NULL DEFAULT 0,
@@ -185,9 +193,37 @@ CREATE TABLE IF NOT EXISTS knowledge_jobs (
     validation_json TEXT NOT NULL,
     error TEXT,
     knowledge_base_id TEXT,
+    retry_of_job_id TEXT REFERENCES knowledge_jobs(id),
+    attempt_no INTEGER NOT NULL DEFAULT 1,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    cancelled_at TEXT,
     created_at TEXT NOT NULL,
     started_at TEXT,
     completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_job_items (
+    job_id TEXT NOT NULL REFERENCES knowledge_jobs(id),
+    source_version_id TEXT NOT NULL REFERENCES source_versions(id),
+    status TEXT NOT NULL DEFAULT 'pending',
+    run_id TEXT REFERENCES runs(id),
+    asset_version_id TEXT REFERENCES asset_versions(id),
+    dataflow_task_id TEXT,
+    error TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    PRIMARY KEY(job_id, source_version_id)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_job_events (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES knowledge_jobs(id),
+    sequence INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(job_id, sequence)
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_bases (
@@ -219,6 +255,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_source_version ON runs(source_version_id, cr
 CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events(run_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_asset_versions_asset ON asset_versions(asset_id, version_no);
 CREATE INDEX IF NOT EXISTS idx_knowledge_jobs_created ON knowledge_jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_knowledge_job_items_status ON knowledge_job_items(job_id, status);
+CREATE INDEX IF NOT EXISTS idx_knowledge_job_events_job ON knowledge_job_events(job_id, sequence);
 CREATE INDEX IF NOT EXISTS idx_knowledge_records_base ON knowledge_records(knowledge_base_id, record_index);
 CREATE INDEX IF NOT EXISTS idx_knowledge_records_source ON knowledge_records(source_version_id);
 """
@@ -254,6 +292,65 @@ class MetadataStore:
             if "is_default" not in columns:
                 connection.execute(
                     "ALTER TABLE standard_pipelines ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0"
+                )
+            if "pipeline_snapshot_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE standard_pipelines ADD COLUMN pipeline_snapshot_json TEXT NOT NULL DEFAULT '{}'"
+                )
+            if "pipeline_hash" not in columns:
+                connection.execute("ALTER TABLE standard_pipelines ADD COLUMN pipeline_hash TEXT")
+            if "sample_task_id" not in columns:
+                connection.execute("ALTER TABLE standard_pipelines ADD COLUMN sample_task_id TEXT")
+            type_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(knowledge_types)").fetchall()
+            }
+            if "logical_key" not in type_columns:
+                connection.execute("ALTER TABLE knowledge_types ADD COLUMN logical_key TEXT")
+            if "version" not in type_columns:
+                connection.execute(
+                    "ALTER TABLE knowledge_types ADD COLUMN version INTEGER NOT NULL DEFAULT 1"
+                )
+            if "supersedes_id" not in type_columns:
+                connection.execute("ALTER TABLE knowledge_types ADD COLUMN supersedes_id TEXT")
+            connection.execute(
+                "UPDATE knowledge_types SET logical_key = id WHERE logical_key IS NULL OR logical_key = ''"
+            )
+            job_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(knowledge_jobs)").fetchall()
+            }
+            if "retry_of_job_id" not in job_columns:
+                connection.execute("ALTER TABLE knowledge_jobs ADD COLUMN retry_of_job_id TEXT")
+            if "attempt_no" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE knowledge_jobs ADD COLUMN attempt_no INTEGER NOT NULL DEFAULT 1"
+                )
+            if "cancel_requested" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE knowledge_jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+                )
+            if "cancelled_at" not in job_columns:
+                connection.execute("ALTER TABLE knowledge_jobs ADD COLUMN cancelled_at TEXT")
+            existing_jobs = connection.execute(
+                "SELECT id, source_version_ids_json, status, created_at FROM knowledge_jobs"
+            ).fetchall()
+            for job in existing_jobs:
+                source_ids = json.loads(job["source_version_ids_json"] or "[]")
+                item_status = job["status"] if job["status"] in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                } else "pending"
+                connection.executemany(
+                    """INSERT OR IGNORE INTO knowledge_job_items
+                       (job_id, source_version_id, status) VALUES (?, ?, ?)""",
+                    [(job["id"], source_id, item_status) for source_id in source_ids],
+                )
+                connection.execute(
+                    """INSERT OR IGNORE INTO knowledge_job_events
+                       VALUES (?, ?, 1, 'created', '处理任务已创建', '{}', ?)""",
+                    (new_id("kjevt"), job["id"], job["created_at"]),
                 )
 
     def create_source(self, name: str, kind: str, metadata: dict[str, Any]) -> dict[str, Any]:
@@ -577,13 +674,57 @@ class MetadataStore:
     ) -> dict[str, Any]:
         with self.connect() as connection:
             connection.execute(
-                """INSERT INTO knowledge_types VALUES (?, ?, ?, ?, 1, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                     name = excluded.name,
-                     description = excluded.description,
-                     schema_json = excluded.schema_json,
-                     active = 1""",
-                (type_id, name, description, _json(schema), utc_now()),
+                """INSERT INTO knowledge_types
+                   (id, name, description, logical_key, version, supersedes_id,
+                    schema_json, active, created_at)
+                   VALUES (?, ?, ?, ?, 1, NULL, ?, 1, ?)
+                   ON CONFLICT(id) DO NOTHING""",
+                (type_id, name, description, type_id, _json(schema), utc_now()),
+            )
+        return self.get_knowledge_type(type_id)
+
+    def create_knowledge_type_version(
+        self,
+        base_type_id: str,
+        type_id: str,
+        name: str,
+        description: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            base_row = connection.execute(
+                "SELECT * FROM knowledge_types WHERE id = ?", (base_type_id,)
+            ).fetchone()
+            if not base_row:
+                raise NotFoundError(f"Knowledge type not found: {base_type_id}")
+            base = _decode_row(base_row) or {}
+            if not base["active"]:
+                raise ValidationError("只能基于当前生效的知识类型创建新版本")
+            logical_key = base.get("logical_key") or base["id"]
+            next_version = connection.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM knowledge_types WHERE logical_key = ?",
+                (logical_key,),
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE knowledge_types SET active = 0 WHERE logical_key = ?",
+                (logical_key,),
+            )
+            connection.execute(
+                """INSERT INTO knowledge_types
+                   (id, name, description, logical_key, version, supersedes_id,
+                    schema_json, active, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+                (
+                    type_id,
+                    name,
+                    description,
+                    logical_key,
+                    next_version,
+                    base_type_id,
+                    _json(schema),
+                    utc_now(),
+                ),
             )
         return self.get_knowledge_type(type_id)
 
@@ -597,7 +738,7 @@ class MetadataStore:
     def list_knowledge_types(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM knowledge_types WHERE active = 1 ORDER BY created_at"
+                "SELECT * FROM knowledge_types ORDER BY logical_key, version DESC, created_at"
             ).fetchall()
         return [_decode_row(row) or {} for row in rows]
 
@@ -613,15 +754,46 @@ class MetadataStore:
         output_schema: dict[str, Any],
         validation_status: str,
         is_default: bool = False,
+        pipeline_snapshot: dict[str, Any] | None = None,
+        pipeline_hash: str | None = None,
+        sample_task_id: str | None = None,
     ) -> dict[str, Any]:
         self.get_knowledge_type(knowledge_type_id)
+        try:
+            existing = self.get_standard_pipeline(pipeline_id)
+        except NotFoundError:
+            existing = None
+        if (
+            existing
+            and existing.get("pipeline_snapshot")
+            and existing.get("validation_status") in {"validated", "inactive"}
+        ):
+            immutable_values = {
+                "name": name,
+                "knowledge_type_id": knowledge_type_id,
+                "pipeline_ref": pipeline_ref,
+                "engine": engine,
+                "version": version,
+                "description": description,
+                "output_schema": output_schema,
+                "pipeline_snapshot": pipeline_snapshot or {},
+                "pipeline_hash": pipeline_hash,
+                "sample_task_id": sample_task_id,
+                "validation_status": validation_status,
+            }
+            if any(existing.get(key) != value for key, value in immutable_values.items()):
+                raise ValidationError("已发布的标准流程版本不可覆盖，请发布新的版本")
+            if is_default and not existing.get("is_default"):
+                return self.set_default_standard_pipeline(pipeline_id)
+            return existing
         now = utc_now()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO standard_pipelines
                    (id, name, knowledge_type_id, pipeline_ref, engine, version, description,
-                    output_schema_json, validation_status, active, is_default, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                    output_schema_json, pipeline_snapshot_json, pipeline_hash, sample_task_id,
+                    validation_status, active, is_default, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                      name = excluded.name,
                      knowledge_type_id = excluded.knowledge_type_id,
@@ -630,6 +802,9 @@ class MetadataStore:
                      version = excluded.version,
                      description = excluded.description,
                      output_schema_json = excluded.output_schema_json,
+                     pipeline_snapshot_json = excluded.pipeline_snapshot_json,
+                     pipeline_hash = excluded.pipeline_hash,
+                     sample_task_id = excluded.sample_task_id,
                      validation_status = excluded.validation_status,
                      active = 1,
                      is_default = CASE
@@ -646,6 +821,9 @@ class MetadataStore:
                     version,
                     description,
                     _json(output_schema),
+                    _json(pipeline_snapshot or {}),
+                    pipeline_hash,
+                    sample_task_id,
                     validation_status,
                     int(is_default),
                     now,
@@ -672,6 +850,18 @@ class MetadataStore:
             )
         return self.get_standard_pipeline(pipeline_id)
 
+    def deactivate_standard_pipeline(self, pipeline_id: str) -> dict[str, Any]:
+        pipeline = self.get_standard_pipeline(pipeline_id)
+        if not pipeline["active"]:
+            return pipeline
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE standard_pipelines SET active = 0, is_default = 0,
+                   validation_status = 'inactive', updated_at = ? WHERE id = ?""",
+                (utc_now(), pipeline_id),
+            )
+        return self.get_standard_pipeline(pipeline_id)
+
     def get_default_standard_pipeline(self, knowledge_type_id: str) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute(
@@ -695,7 +885,7 @@ class MetadataStore:
         query = """SELECT p.*, k.name AS knowledge_type_name
                    FROM standard_pipelines p
                    JOIN knowledge_types k ON k.id = p.knowledge_type_id
-                   WHERE p.active = 1"""
+                   WHERE 1 = 1"""
         params: tuple[Any, ...] = ()
         if knowledge_type_id:
             query += " AND p.knowledge_type_id = ?"
@@ -711,17 +901,47 @@ class MetadataStore:
         knowledge_type_id: str,
         standard_pipeline_id: str,
         source_version_ids: list[str],
+        retry_of_job_id: str | None = None,
+        attempt_no: int = 1,
     ) -> dict[str, Any]:
         job_id = new_id("kjob")
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO knowledge_jobs
                    (id, name, knowledge_type_id, standard_pipeline_id, source_version_ids_json,
-                    status, progress, validation_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, 'pending', 0, '{}', ?)""",
-                (job_id, name, knowledge_type_id, standard_pipeline_id, _json(source_version_ids), utc_now()),
+                    status, progress, validation_json, retry_of_job_id, attempt_no, created_at)
+                   VALUES (?, ?, ?, ?, ?, 'pending', 0, '{}', ?, ?, ?)""",
+                (
+                    job_id,
+                    name,
+                    knowledge_type_id,
+                    standard_pipeline_id,
+                    _json(source_version_ids),
+                    retry_of_job_id,
+                    max(1, attempt_no),
+                    utc_now(),
+                ),
+            )
+            connection.executemany(
+                """INSERT INTO knowledge_job_items
+                   (job_id, source_version_id, status) VALUES (?, ?, 'pending')""",
+                [(job_id, source_id) for source_id in source_version_ids],
+            )
+            connection.execute(
+                """INSERT INTO knowledge_job_events
+                   VALUES (?, ?, 1, 'created', '处理任务已创建', '{}', ?)""",
+                (new_id("kjevt"), job_id, utc_now()),
             )
         return self.get_knowledge_job(job_id)
+
+    def get_knowledge_job_retry(self, job_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM knowledge_jobs WHERE retry_of_job_id = ?
+                   ORDER BY attempt_no DESC, created_at DESC LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+        return _decode_row(row)
 
     def update_knowledge_job(
         self,
@@ -733,15 +953,23 @@ class MetadataStore:
         error: str | None = None,
         knowledge_base_id: str | None = None,
     ) -> dict[str, Any]:
-        current = self.get_knowledge_job(job_id)
-        new_status = status or current["status"]
-        started_at = current.get("started_at")
-        completed_at = current.get("completed_at")
-        if new_status == "running" and not started_at:
-            started_at = utc_now()
-        if new_status in {"completed", "failed"}:
-            completed_at = utc_now()
         with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM knowledge_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not row:
+                raise NotFoundError(f"Knowledge job not found: {job_id}")
+            current = _decode_row(row) or {}
+            new_status = status or current["status"]
+            if current.get("cancel_requested") and new_status in {"running", "completed"}:
+                new_status = "cancelled"
+            started_at = current.get("started_at")
+            completed_at = current.get("completed_at")
+            if new_status == "running" and not started_at:
+                started_at = utc_now()
+            if new_status in {"completed", "failed", "cancelled"}:
+                completed_at = utc_now()
             connection.execute(
                 """UPDATE knowledge_jobs SET status = ?, progress = ?, validation_json = ?,
                    error = ?, knowledge_base_id = ?, started_at = ?, completed_at = ? WHERE id = ?""",
@@ -758,6 +986,181 @@ class MetadataStore:
             )
         return self.get_knowledge_job(job_id)
 
+    def request_knowledge_job_cancel(self, job_id: str) -> dict[str, Any]:
+        now = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT status FROM knowledge_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not current:
+                raise NotFoundError(f"Knowledge job not found: {job_id}")
+            if current["status"] not in {"pending", "running"}:
+                raise ValidationError("只有等待中或处理中的任务可以取消")
+            connection.execute(
+                """UPDATE knowledge_jobs SET status = 'cancelled', cancel_requested = 1,
+                   cancelled_at = ?, completed_at = ? WHERE id = ?""",
+                (now, now, job_id),
+            )
+            connection.execute(
+                """UPDATE knowledge_job_items SET status = 'cancelled', completed_at = ?
+                   WHERE job_id = ? AND status IN ('pending', 'running')""",
+                (now, job_id),
+            )
+        return self.get_knowledge_job(job_id)
+
+    def is_knowledge_job_cancel_requested(self, job_id: str) -> bool:
+        job = self.get_knowledge_job(job_id)
+        return bool(job.get("cancel_requested")) or job["status"] == "cancelled"
+
+    def update_knowledge_job_item(
+        self,
+        job_id: str,
+        source_version_id: str,
+        *,
+        status: str | None = None,
+        run_id: str | None = None,
+        asset_version_id: str | None = None,
+        dataflow_task_id: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        job = self.get_knowledge_job(job_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM knowledge_job_items
+                   WHERE job_id = ? AND source_version_id = ?""",
+                (job_id, source_version_id),
+            ).fetchone()
+            if not row:
+                raise NotFoundError(
+                    f"Knowledge job item not found: {job_id}/{source_version_id}"
+                )
+            current = dict(row)
+            next_status = status or current["status"]
+            if job["status"] == "cancelled" and next_status not in {"failed", "cancelled"}:
+                next_status = "cancelled"
+            started_at = current.get("started_at")
+            completed_at = current.get("completed_at")
+            if next_status == "running" and not started_at:
+                started_at = utc_now()
+            if next_status in {"completed", "failed", "cancelled"}:
+                completed_at = utc_now()
+            connection.execute(
+                """UPDATE knowledge_job_items SET status = ?, run_id = ?, asset_version_id = ?,
+                   dataflow_task_id = ?, error = ?, started_at = ?, completed_at = ?
+                   WHERE job_id = ? AND source_version_id = ?""",
+                (
+                    next_status,
+                    run_id or current.get("run_id"),
+                    asset_version_id or current.get("asset_version_id"),
+                    dataflow_task_id or current.get("dataflow_task_id"),
+                    error,
+                    started_at,
+                    completed_at,
+                    job_id,
+                    source_version_id,
+                ),
+            )
+            updated = connection.execute(
+                """SELECT * FROM knowledge_job_items
+                   WHERE job_id = ? AND source_version_id = ?""",
+                (job_id, source_version_id),
+            ).fetchone()
+        return dict(updated) if updated else {}
+
+    def list_knowledge_job_items(self, job_id: str) -> list[dict[str, Any]]:
+        self.get_knowledge_job(job_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT i.*, s.name AS source_name, sv.original_filename,
+                          sv.version_no AS source_version_no
+                   FROM knowledge_job_items i
+                   JOIN source_versions sv ON sv.id = i.source_version_id
+                   JOIN sources s ON s.id = sv.source_id
+                   WHERE i.job_id = ? ORDER BY i.started_at, i.source_version_id""",
+                (job_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_knowledge_job_event(
+        self,
+        job_id: str,
+        event_type: str,
+        message: str,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event_id = new_id("kjevt")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if not connection.execute(
+                "SELECT 1 FROM knowledge_jobs WHERE id = ?", (job_id,)
+            ).fetchone():
+                raise NotFoundError(f"Knowledge job not found: {job_id}")
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM knowledge_job_events WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO knowledge_job_events VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event_id,
+                    job_id,
+                    sequence,
+                    event_type,
+                    message,
+                    _json(detail or {}),
+                    utc_now(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM knowledge_job_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        return _decode_row(row) or {}
+
+    def list_knowledge_job_events(self, job_id: str) -> list[dict[str, Any]]:
+        self.get_knowledge_job(job_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM knowledge_job_events WHERE job_id = ? ORDER BY sequence",
+                (job_id,),
+            ).fetchall()
+        return [_decode_row(row) or {} for row in rows]
+
+    def recover_interrupted_knowledge_jobs(self) -> list[str]:
+        """Fail attempts that could only belong to a previous app process."""
+        now = utc_now()
+        reason = "服务进程在任务完成前退出，请创建新的重试尝试"
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT id FROM knowledge_jobs WHERE status IN ('pending', 'running')"
+            ).fetchall()
+            job_ids = [row["id"] for row in rows]
+            if not job_ids:
+                return []
+            placeholders = ",".join("?" for _ in job_ids)
+            connection.execute(
+                f"""UPDATE knowledge_jobs SET status = 'failed', error = ?, completed_at = ?
+                    WHERE id IN ({placeholders})""",
+                (reason, now, *job_ids),
+            )
+            connection.execute(
+                f"""UPDATE knowledge_job_items SET status = 'failed', error = ?, completed_at = ?
+                    WHERE job_id IN ({placeholders}) AND status IN ('pending', 'running')""",
+                (reason, now, *job_ids),
+            )
+            for job_id in job_ids:
+                sequence = connection.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM knowledge_job_events WHERE job_id = ?",
+                    (job_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO knowledge_job_events VALUES (?, ?, ?, 'recovered', ?, '{}', ?)",
+                    (new_id("kjevt"), job_id, sequence, reason, now),
+                )
+        return job_ids
+
     def get_knowledge_job(self, job_id: str) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute("SELECT * FROM knowledge_jobs WHERE id = ?", (job_id,)).fetchone()
@@ -768,13 +1171,38 @@ class MetadataStore:
     def list_knowledge_jobs(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                """SELECT j.*, k.name AS knowledge_type_name, p.name AS standard_pipeline_name
+                """SELECT j.*, k.name AS knowledge_type_name, p.name AS standard_pipeline_name,
+                          p.engine AS standard_pipeline_engine, p.pipeline_ref,
+                          p.version AS standard_pipeline_version
                    FROM knowledge_jobs j
                    JOIN knowledge_types k ON k.id = j.knowledge_type_id
                    JOIN standard_pipelines p ON p.id = j.standard_pipeline_id
                    ORDER BY j.created_at DESC"""
             ).fetchall()
         return [_decode_row(row) or {} for row in rows]
+
+    def list_knowledge_job_executions(self, knowledge_base_id: str | None) -> list[dict[str, Any]]:
+        if not knowledge_base_id:
+            return []
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT kr.source_version_id, kr.run_id, kr.asset_version_id,
+                          COUNT(*) AS record_count, MIN(kr.source_locator_json) AS locator_json,
+                          r.engine
+                   FROM knowledge_records kr
+                   LEFT JOIN runs r ON r.id = kr.run_id
+                   WHERE kr.knowledge_base_id = ?
+                   GROUP BY kr.source_version_id, kr.run_id, kr.asset_version_id, r.engine
+                   ORDER BY MIN(kr.record_index)""",
+                (knowledge_base_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            locator = json.loads(item.pop("locator_json") or "{}")
+            item["dataflow_task_id"] = locator.get("dataflow_task_id")
+            result.append(item)
+        return result
 
     def create_knowledge_base(
         self,
@@ -787,6 +1215,17 @@ class MetadataStore:
         base_id = new_id("kb")
         now = utc_now()
         with self.connect() as connection:
+            # Serialize the final cancellation check and publication so a job
+            # cannot become cancelled while its knowledge base is committed.
+            connection.execute("BEGIN IMMEDIATE")
+            job = connection.execute(
+                "SELECT status, cancel_requested FROM knowledge_jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+            if not job:
+                raise NotFoundError(f"Knowledge job not found: {job_id}")
+            if job["status"] != "running" or job["cancel_requested"]:
+                raise ValidationError("任务已取消或不再处于可发布状态")
             connection.execute(
                 "INSERT INTO knowledge_bases VALUES (?, ?, ?, ?, ?, ?, 'available', ?)",
                 (base_id, name, knowledge_type_id, standard_pipeline_id, job_id, len(records), now),
@@ -807,6 +1246,11 @@ class MetadataStore:
                         now,
                     ),
                 )
+            connection.execute(
+                """UPDATE knowledge_jobs SET status = 'completed', progress = 100,
+                   knowledge_base_id = ?, completed_at = ? WHERE id = ?""",
+                (base_id, now, job_id),
+            )
         return self.get_knowledge_base(base_id)
 
     def get_knowledge_base(self, base_id: str) -> dict[str, Any]:

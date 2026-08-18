@@ -10,5 +10,9 @@ class ValidationError(DataForgeError):
     """Input or state transition is invalid."""
 
 
+class AuthenticationError(DataForgeError):
+    """A serving request did not provide a valid application credential."""
+
+
 class EngineUnavailableError(DataForgeError):
     """The requested processing engine cannot be loaded."""
