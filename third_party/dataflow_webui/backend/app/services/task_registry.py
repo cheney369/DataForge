@@ -356,6 +356,7 @@ class TaskRegistry:
         operator_logs = output.get("operator_logs", {})
         
         # 确定要查询的步骤索引
+        is_latest_step = step is None
         if step is None:
             # 默认返回最后一个已完成的步骤
             if execution_results:
@@ -374,18 +375,34 @@ class TaskRegistry:
                 else:
                     step = 0
         
-        # 读取缓存文件（使用绝对路径）
+        # 每个任务都有独立缓存目录。旧实现只读取 CACHE_DIR 下的共享文件，
+        # 因此任务虽然执行成功，详情页仍会显示空结果。
         cache_path = settings.CACHE_DIR
         cache_file_prefix = "dataflow_cache_step"
-        cache_file = os.path.join(cache_path, f"{cache_file_prefix}_step{step}.jsonl")
+        candidates = []
+        final_output_file = output.get("final_output_file")
+        if is_latest_step and final_output_file:
+            candidates.append(final_output_file)
+        candidates.extend(
+            [
+                os.path.join(
+                    cache_path,
+                    f"{task_id}_output",
+                    f"{cache_file_prefix}_step{step + 1}.jsonl",
+                ),
+                # 保留对旧版共享缓存命名的兼容读取。
+                os.path.join(cache_path, f"{cache_file_prefix}_{step}.jsonl"),
+                os.path.join(cache_path, f"{cache_file_prefix}_step{step + 1}.jsonl"),
+            ]
+        )
+        cache_file = next(
+            (candidate for candidate in candidates if candidate and os.path.exists(candidate)),
+            candidates[0],
+        )
         
         sample_data = []
         total_count = 0
         file_exists = False
-        
-        # 如果当前 step 的文件不存在，尝试读取上一步的文件
-        if not os.path.exists(cache_file) and step > 0:
-            cache_file = os.path.join(cache_path, f"{cache_file_prefix}_step{step-1}.jsonl")
         
         if os.path.exists(cache_file):
             file_exists = True

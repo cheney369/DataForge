@@ -7,6 +7,7 @@
     pytest tests/test_task_registry.py::test_create_task -v  # 运行单个测试
 """
 import pytest
+from app.services import task_registry as task_registry_module
 from app.services.task_registry import TaskRegistry
 
 
@@ -204,6 +205,51 @@ class TestTaskRegistry:
         assert task["created_at"] <= task["started_at"]
         assert task["started_at"] <= task["finished_at"]
 
+    def test_execution_result_reads_task_isolated_output(
+        self, task_registry, tmp_path, monkeypatch
+    ):
+        cache_dir = tmp_path / "cache"
+        output_dir = cache_dir / "execution-1_output"
+        output_dir.mkdir(parents=True)
+        output_file = output_dir / "dataflow_cache_step_step2.jsonl"
+        output_file.write_text(
+            '{"messages":[{"role":"user","content":"你好"}]}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(task_registry_module.settings, "CACHE_DIR", str(cache_dir))
+        task_registry._write(
+            {
+                "tasks": {
+                    "execution-1": {
+                        "task_id": "execution-1",
+                        "pipeline_id": "pipeline-1",
+                        "status": "completed",
+                        "output": {
+                            "execution_results": [
+                                {"index": 0},
+                                {"index": 1},
+                            ],
+                            "operators_detail": {
+                                "Adapter_1": {
+                                    "name": "Adapter",
+                                    "index": 1,
+                                    "status": "completed",
+                                }
+                            },
+                        },
+                        "logs": [],
+                    }
+                }
+            }
+        )
+
+        result = task_registry.get_execution_result("execution-1")
+
+        assert result["file_exists"] is True
+        assert result["total_count"] == 1
+        assert result["sample_data"][0]["messages"][0]["content"] == "你好"
+        assert result["cache_file"] == str(output_file)
+
 
 class TestTaskRegistryEdgeCases:
     """任务注册表边界情况测试"""
@@ -284,4 +330,3 @@ def test_filter_by_status(task_registry, sample_task_data, status):
     filtered_tasks = task_registry.list(status=status)
     assert len(filtered_tasks) >= 1
     assert all(t["status"] == status for t in filtered_tasks)
-

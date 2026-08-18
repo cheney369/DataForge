@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .application import DataForge
-from .errors import ValidationError
+from .errors import NotFoundError, ValidationError
 from .processing.native import split_text
 
 
@@ -88,6 +88,10 @@ STANDARD_PIPELINES = [
 ]
 
 
+class JobCancelled(Exception):
+    """Internal cooperative stop signal for a knowledge production attempt."""
+
+
 class KnowledgeService:
     def __init__(self, dataforge: DataForge):
         self.dataforge = dataforge
@@ -100,18 +104,26 @@ class KnowledgeService:
             store.register_knowledge_type(item["id"], item["name"], item["description"], item["schema"])
             schemas[item["id"]] = item["schema"]
         for item in STANDARD_PIPELINES:
-            store.register_standard_pipeline(
-                item["id"],
-                item["name"],
-                item["knowledge_type_id"],
-                item["pipeline_ref"],
-                item["engine"],
-                item["version"],
-                item["description"],
-                schemas[item["knowledge_type_id"]],
-                item["validation_status"],
-                item["id"] == "std-text-chunk-v1",
-            )
+            try:
+                # Published releases are immutable governance records. Startup
+                # seeds must not replace their frozen DataFlow snapshot.
+                store.get_standard_pipeline(item["id"])
+            except NotFoundError:
+                store.register_standard_pipeline(
+                    item["id"],
+                    item["name"],
+                    item["knowledge_type_id"],
+                    item["pipeline_ref"],
+                    item["engine"],
+                    item["version"],
+                    item["description"],
+                    schemas[item["knowledge_type_id"]],
+                    item["validation_status"],
+                    item["id"] == "std-text-chunk-v1",
+                )
+
+    def recover_interrupted_jobs(self) -> list[str]:
+        return self.dataforge.store.recover_interrupted_knowledge_jobs()
 
     def create_job(
         self,
@@ -125,7 +137,9 @@ class KnowledgeService:
             raise ValidationError("请填写知识库名称")
         if not source_version_ids:
             raise ValidationError("请至少选择一个源文件版本")
-        self.dataforge.store.get_knowledge_type(knowledge_type_id)
+        knowledge_type = self.dataforge.store.get_knowledge_type(knowledge_type_id)
+        if not knowledge_type["active"]:
+            raise ValidationError("该知识类型版本已停用，请选择当前版本")
         pipeline = (
             self.dataforge.store.get_standard_pipeline(standard_pipeline_id)
             if standard_pipeline_id
@@ -135,6 +149,15 @@ class KnowledgeService:
             raise ValidationError("所选标准流程与知识库类型不兼容")
         if pipeline["validation_status"] != "validated" or not pipeline["active"]:
             raise ValidationError("该标准流程尚未通过输出格式验证，不能用于正式加工")
+        if pipeline.get("engine") == "dataflow-studio":
+            if not self.studio:
+                raise ValidationError("DataFlow 运行时当前不可用")
+            preflight = self.studio.preflight_pipeline(
+                (pipeline.get("pipeline_snapshot") or {}).get("config") or {}
+            )
+            if preflight["status"] != "ready":
+                messages = "；".join(issue["message"] for issue in preflight["issues"])
+                raise ValidationError(f"标准流程当前不可运行：{messages}")
         for version_id in dict.fromkeys(source_version_ids):
             self.dataforge.store.get_source_version(version_id)
         return self.dataforge.store.create_knowledge_job(
@@ -144,44 +167,31 @@ class KnowledgeService:
     def execute_job(self, job_id: str) -> dict[str, Any]:
         store = self.dataforge.store
         job = store.get_knowledge_job(job_id)
+        if job["status"] != "pending":
+            raise ValidationError("只有等待处理的任务可以开始执行")
         pipeline = store.get_standard_pipeline(job["standard_pipeline_id"])
         source_ids = job["source_version_ids"]
         store.update_knowledge_job(job_id, status="running", progress=5)
+        self._record_event(job_id, "started", "开始执行标准流程")
         try:
             results = []
             with ThreadPoolExecutor(max_workers=min(4, len(source_ids))) as executor:
-                if pipeline["pipeline_ref"] == "medical-document-v1":
-                    engine = "dataflow" if self.dataforge.settings.dataflow_path else "native"
-                    futures = {
-                        executor.submit(
-                            self.dataforge.run,
-                            version_id,
-                            pipeline_id=pipeline["pipeline_ref"],
-                            engine_override=engine,
-                        ): version_id
-                        for version_id in source_ids
-                    }
-                elif pipeline["pipeline_ref"].startswith("studio:") and self.studio:
-                    upstream_id = pipeline["pipeline_ref"].removeprefix("studio:")
-                    futures = {
-                        executor.submit(
-                            self.studio.run_pipeline_for_source,
-                            self.dataforge,
-                            version_id,
-                            upstream_id,
-                        ): version_id
-                        for version_id in source_ids
-                    }
-                else:
-                    raise ValidationError("该标准流程缺少可执行的 DataFlow 流程版本")
+                self._raise_if_cancelled(job_id)
+                futures = {
+                    executor.submit(self._execute_job_source, job_id, pipeline, version_id): version_id
+                    for version_id in source_ids
+                }
                 for completed, future in enumerate(as_completed(futures), start=1):
                     results.append(future.result())
+                    self._raise_if_cancelled(job_id)
                     progress = 5 + int(completed / len(futures) * 70)
                     store.update_knowledge_job(job_id, status="running", progress=progress)
 
+            self._raise_if_cancelled(job_id)
+            self._record_event(job_id, "validating", "正在校验处理结果的输出结构")
             records: list[dict[str, Any]] = []
             validation_errors: list[dict[str, Any]] = []
-            input_cache: dict[str, dict[int, str]] = {}
+            input_cache: dict[str, dict[int, dict[str, Any]]] = {}
             for result in results:
                 if isinstance(result, dict):
                     output = Path(result["output_file"])
@@ -213,18 +223,29 @@ class KnowledgeService:
                                 }
                             )
                             continue
+                        source_record = raw_records.get(
+                            int(data.get("source_record_index") or 0), {}
+                        )
+                        source_locator = {
+                            **(source_record.get("source_locator") or {}),
+                            "source_record_index": data.get("source_record_index"),
+                            "chunk_index": data.get("chunk_index"),
+                            "document_id": data.get("document_id"),
+                            "dataflow_task_id": dataflow_task_id,
+                            "source_excerpt": _source_excerpt(raw_records, data),
+                        }
+                        target = str(data.get("content") or "")
+                        raw_content = str(source_record.get("raw_content") or "")
+                        relative_start = raw_content.find(target) if target else -1
+                        if relative_start >= 0:
+                            source_locator["chunk_character_start"] = relative_start
+                            source_locator["chunk_character_end"] = relative_start + len(target)
                         records.append(
                             {
                                 "source_version_id": source_version["id"],
                                 "run_id": run_id,
                                 "asset_version_id": asset_version_id,
-                                "source_locator": {
-                                    "source_record_index": data.get("source_record_index"),
-                                    "chunk_index": data.get("chunk_index"),
-                                    "document_id": data.get("document_id"),
-                                    "dataflow_task_id": dataflow_task_id,
-                                    "source_excerpt": _source_excerpt(raw_records, data),
-                                },
+                                "source_locator": source_locator,
                                 "data": data,
                             }
                         )
@@ -236,15 +257,50 @@ class KnowledgeService:
                 "invalid_records": len(validation_errors),
                 "errors": validation_errors[:20],
             }
+            self._raise_if_cancelled(job_id)
             store.update_knowledge_job(job_id, status="running", progress=85, validation=validation)
             if validation_errors:
                 raise ValidationError(f"输出格式验证失败，共 {len(validation_errors)} 条数据不符合知识库格式")
             if not records:
                 raise ValidationError("处理结果为空，未生成知识资产")
 
+            self._raise_if_cancelled(job_id)
+            self._record_event(
+                job_id,
+                "validation_completed",
+                f"输出结构校验通过，共 {len(records)} 条有效记录",
+                {"record_count": len(records)},
+            )
             knowledge_base = store.create_knowledge_base(
                 job["name"], job["knowledge_type_id"], job["standard_pipeline_id"], job_id, records
             )
+            self._record_event(
+                job_id,
+                "published",
+                f"知识资产已入库，共 {len(records)} 条记录",
+                {"knowledge_base_id": knowledge_base["id"], "record_count": len(records)},
+            )
+            try:
+                auto_index = self.dataforge.indexing.create_auto_index_job(knowledge_base["id"])
+                if auto_index:
+                    index_job = auto_index["index_job"]
+                    self._record_event(
+                        job_id,
+                        "index_created",
+                        "已根据默认索引方案创建异步索引任务",
+                        {
+                            "knowledge_index_id": auto_index["knowledge_index"]["id"],
+                            "index_job_id": index_job["id"],
+                        },
+                    )
+            except Exception as indexing_error:
+                # Indexing is an independent derived stage. Its failure must
+                # never invalidate the already committed factual knowledge base.
+                self._record_event(
+                    job_id,
+                    "index_failed",
+                    f"知识资产已入库，但自动索引未能启动：{indexing_error}",
+                )
             return store.update_knowledge_job(
                 job_id,
                 status="completed",
@@ -252,8 +308,251 @@ class KnowledgeService:
                 validation=validation,
                 knowledge_base_id=knowledge_base["id"],
             )
+        except JobCancelled:
+            self._record_event(job_id, "cancelled", "任务已停止，处理结果未发布")
+            current = store.get_knowledge_job(job_id)
+            if current["status"] != "cancelled":
+                return store.update_knowledge_job(job_id, status="cancelled")
+            return current
         except Exception as exc:
+            if store.is_knowledge_job_cancel_requested(job_id):
+                self._record_event(job_id, "cancelled", "任务已停止，处理结果未发布")
+                return store.get_knowledge_job(job_id)
+            self._record_event(job_id, "failed", f"任务执行失败：{exc}")
             return store.update_knowledge_job(job_id, status="failed", error=str(exc))
+
+    def _raise_if_cancelled(self, job_id: str) -> None:
+        if self.dataforge.store.is_knowledge_job_cancel_requested(job_id):
+            raise JobCancelled()
+
+    def _record_event(
+        self,
+        job_id: str,
+        event_type: str,
+        message: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        try:
+            self.dataforge.store.add_knowledge_job_event(
+                job_id, event_type, message, detail
+            )
+        except Exception:
+            # Observability must never change the processing result.
+            pass
+
+    def _execute_job_source(
+        self,
+        job_id: str,
+        pipeline: dict[str, Any],
+        source_version_id: str,
+    ) -> Any:
+        store = self.dataforge.store
+        self._raise_if_cancelled(job_id)
+        store.update_knowledge_job_item(job_id, source_version_id, status="running")
+        version = store.get_source_version(source_version_id)
+        source = store.get_source(version["source_id"])
+        source_label = source["name"]
+        self._record_event(
+            job_id,
+            "source_started",
+            f"开始处理文档：{source_label}",
+            {"source_version_id": source_version_id},
+        )
+        try:
+            if pipeline["pipeline_ref"] == "medical-document-v1":
+                engine = "dataflow" if self.dataforge.settings.dataflow_path else "native"
+                result = self.dataforge.run(
+                    source_version_id,
+                    pipeline_id=pipeline["pipeline_ref"],
+                    engine_override=engine,
+                )
+                self._raise_if_cancelled(job_id)
+                store.update_knowledge_job_item(
+                    job_id,
+                    source_version_id,
+                    status="completed",
+                    run_id=result.run["id"],
+                    asset_version_id=result.asset_version["id"],
+                )
+                self._record_event(
+                    job_id,
+                    "source_completed",
+                    f"文档处理完成：{source_label}",
+                    {"source_version_id": source_version_id},
+                )
+                return result
+            if pipeline["pipeline_ref"].startswith("studio:") and self.studio:
+                upstream_id = pipeline["pipeline_ref"].removeprefix("studio:")
+
+                def record_task(task_id: str) -> None:
+                    store.update_knowledge_job_item(
+                        job_id,
+                        source_version_id,
+                        dataflow_task_id=task_id,
+                    )
+                    self._raise_if_cancelled(job_id)
+
+                result = self.studio.run_pipeline_for_source(
+                    self.dataforge,
+                    source_version_id,
+                    upstream_id,
+                    pipeline.get("pipeline_snapshot") or None,
+                    on_task_started=record_task,
+                )
+                self._raise_if_cancelled(job_id)
+                store.update_knowledge_job_item(
+                    job_id,
+                    source_version_id,
+                    status="completed",
+                    dataflow_task_id=result["task_id"],
+                )
+                try:
+                    task_detail = self.studio.get_task_detail(result["task_id"])
+                    operator_details = (task_detail.get("status") or {}).get("operators_detail") or {}
+                except Exception:
+                    operator_details = {}
+                self._record_event(
+                    job_id,
+                    "source_completed",
+                    f"文档处理完成：{source_label}（{len(operator_details)} 个算子）",
+                    {
+                        "source_version_id": source_version_id,
+                        "operator_count": len(operator_details),
+                    },
+                )
+                return result
+            raise ValidationError("该标准流程缺少可执行的 DataFlow 流程版本")
+        except JobCancelled:
+            store.update_knowledge_job_item(
+                job_id,
+                source_version_id,
+                status="cancelled",
+            )
+            self._record_event(job_id, "source_cancelled", f"已停止处理文档：{source_label}")
+            raise
+        except Exception as exc:
+            if store.is_knowledge_job_cancel_requested(job_id):
+                store.update_knowledge_job_item(
+                    job_id,
+                    source_version_id,
+                    status="cancelled",
+                )
+                self._record_event(job_id, "source_cancelled", f"已停止处理文档：{source_label}")
+                raise JobCancelled() from exc
+            store.update_knowledge_job_item(
+                job_id,
+                source_version_id,
+                status="failed",
+                error=str(exc),
+            )
+            self._record_event(job_id, "source_failed", f"文档处理失败：{source_label}；{exc}")
+            raise
+
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
+        store = self.dataforge.store
+        cancelled = store.request_knowledge_job_cancel(job_id)
+        self._record_event(job_id, "cancel_requested", "用户请求取消任务")
+        if self.studio:
+            for item in store.list_knowledge_job_items(job_id):
+                task_id = item.get("dataflow_task_id")
+                if not task_id:
+                    continue
+                try:
+                    self.studio.cancel_task(task_id)
+                except (NotFoundError, ValidationError):
+                    # Cooperative cancellation still prevents validation and
+                    # publishing when an upstream executor cannot be interrupted.
+                    pass
+        return cancelled
+
+    def retry_job(self, job_id: str) -> dict[str, Any]:
+        store = self.dataforge.store
+        failed = store.get_knowledge_job(job_id)
+        if failed["status"] not in {"failed", "cancelled"}:
+            raise ValidationError("只有失败或已取消的任务可以重试")
+        existing_retry = store.get_knowledge_job_retry(job_id)
+        if existing_retry:
+            raise ValidationError(f"该任务已经创建后续尝试：{existing_retry['id']}")
+        pipeline = store.get_standard_pipeline(failed["standard_pipeline_id"])
+        if pipeline["validation_status"] != "validated" or not pipeline["active"]:
+            raise ValidationError("原任务使用的标准流程当前不可用，不能直接重试")
+        for version_id in failed["source_version_ids"]:
+            store.get_source_version(version_id)
+        retry = store.create_knowledge_job(
+            failed["name"],
+            failed["knowledge_type_id"],
+            failed["standard_pipeline_id"],
+            failed["source_version_ids"],
+            retry_of_job_id=failed["id"],
+            attempt_no=int(failed.get("attempt_no") or 1) + 1,
+        )
+        self._record_event(
+            failed["id"],
+            "retry_created",
+            f"已创建第 {retry['attempt_no']} 次尝试",
+            {"retry_job_id": retry["id"]},
+        )
+        self._record_event(
+            retry["id"],
+            "retry_started",
+            f"从第 {failed.get('attempt_no') or 1} 次尝试重新开始",
+            {"retry_of_job_id": failed["id"]},
+        )
+        return retry
+
+    def get_job_detail(self, job_id: str) -> dict[str, Any]:
+        store = self.dataforge.store
+        job = store.get_knowledge_job(job_id)
+        pipeline = store.get_standard_pipeline(job["standard_pipeline_id"])
+        knowledge_type = store.get_knowledge_type(job["knowledge_type_id"])
+        sources = []
+        for version_id in job["source_version_ids"]:
+            version = store.get_source_version(version_id)
+            source = store.get_source(version["source_id"])
+            sources.append(
+                {
+                    "source_id": source["id"],
+                    "source_name": source["name"],
+                    "source_version_id": version["id"],
+                    "version_no": version["version_no"],
+                    "original_filename": version["original_filename"],
+                    "size_bytes": version["size_bytes"],
+                }
+            )
+        executions = store.list_knowledge_job_executions(job.get("knowledge_base_id"))
+        for execution in executions:
+            execution["engine"] = execution.get("engine") or pipeline["engine"]
+        retry = store.get_knowledge_job_retry(job_id)
+        return {
+            **job,
+            "knowledge_type_name": knowledge_type["name"],
+            "standard_pipeline_name": pipeline["name"],
+            "standard_pipeline": {
+                "id": pipeline["id"],
+                "name": pipeline["name"],
+                "pipeline_ref": pipeline["pipeline_ref"],
+                "engine": pipeline["engine"],
+                "version": pipeline["version"],
+                "validation_status": pipeline["validation_status"],
+                "pipeline_hash": pipeline.get("pipeline_hash"),
+                "sample_task_id": pipeline.get("sample_task_id"),
+                "uses_frozen_snapshot": bool(pipeline.get("pipeline_snapshot")),
+            },
+            "sources": sources,
+            "items": store.list_knowledge_job_items(job_id),
+            "events": store.list_knowledge_job_events(job_id),
+            "executions": executions,
+            "retry_job": (
+                {
+                    "id": retry["id"],
+                    "status": retry["status"],
+                    "attempt_no": retry.get("attempt_no", 1),
+                    "created_at": retry["created_at"],
+                }
+                if retry
+                else None
+            ),
+        }
 
     def get_record_lineage(self, record_id: str) -> dict[str, Any]:
         lineage = self.dataforge.store.get_knowledge_record_lineage(record_id)
@@ -270,22 +569,24 @@ class KnowledgeService:
         return lineage
 
 
-def _read_source_records(path: Path) -> dict[int, str]:
+def _read_source_records(path: Path) -> dict[int, dict[str, Any]]:
     if not path.is_file():
         return {}
-    result: dict[int, str] = {}
+    result: dict[int, dict[str, Any]] = {}
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
                 continue
             item = json.loads(line)
-            result[int(item.get("source_record_index", len(result)))] = str(item.get("raw_content") or "")
+            result[int(item.get("source_record_index", len(result)))] = item
     return result
 
 
-def _source_excerpt(source_records: dict[int, str], record: dict[str, Any]) -> str:
+def _source_excerpt(
+    source_records: dict[int, dict[str, Any]], record: dict[str, Any]
+) -> str:
     source_index = int(record.get("source_record_index") or 0)
-    raw = source_records.get(source_index, "")
+    raw = str((source_records.get(source_index) or {}).get("raw_content") or "")
     if not raw:
         return ""
     chunk_index = int(record.get("chunk_index") or 0)

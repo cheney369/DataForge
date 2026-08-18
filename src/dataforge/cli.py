@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .application import DEFAULT_PIPELINE_ID, DataForge
+from .deployment import probe_dependencies, readiness_report, smoke_server
 from .errors import DataForgeError
 
 
@@ -31,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("init", help="Initialize metadata, storage, and default pipelines")
     commands.add_parser("health", help="Show workspace and DataFlow integration health")
+    doctor = commands.add_parser("doctor", help="Check deployment configuration and dependencies")
+    doctor.add_argument("--deep", action="store_true", help="Call configured model and storage services")
+    smoke = commands.add_parser("smoke", help="Verify a running DataForge HTTP service")
+    smoke.add_argument("--url", default="http://127.0.0.1:8000")
+    smoke.add_argument("--timeout", type=float, default=10)
 
     source = commands.add_parser("source", help="Manage source files")
     source_commands = source.add_subparsers(dest="source_command", required=True)
@@ -86,11 +92,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def dispatch(args: argparse.Namespace) -> Any:
+    if args.command == "smoke":
+        return smoke_server(args.url, timeout_seconds=args.timeout)
     app = DataForge.open(args.root, args.dataflow_path)
     if args.command == "init":
         return app.health()
     if args.command == "health":
         return app.health()
+    if args.command == "doctor":
+        probes = probe_dependencies(app) if args.deep else None
+        report = readiness_report(app)
+        if probes is not None:
+            report["dependency_probes"] = probes
+        return report
     if args.command == "source":
         if args.source_command == "add":
             return app.sources.ingest(
@@ -152,7 +166,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        emit(dispatch(args))
+        result = dispatch(args)
+        emit(result)
+        if args.command == "doctor" and (
+            not result.get("ready")
+            or (
+                args.deep
+                and result.get("dependency_probes", {}).get("status") != "ready"
+            )
+        ):
+            return 1
         return 0
     except (DataForgeError, OSError, ValueError) as exc:
         emit({"ok": False, "error": type(exc).__name__, "message": str(exc)}, stream=sys.stderr)

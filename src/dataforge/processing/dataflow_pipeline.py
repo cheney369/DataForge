@@ -7,6 +7,8 @@ DataFlow internals during metadata-only operations.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -78,6 +80,48 @@ class ChunkMedicalTextOperator(OperatorABC):
                 )
         storage.write(pd.DataFrame(rows))
         return [output_key]
+
+
+@OPERATOR_REGISTRY.register()
+class ConversationSchemaAdapterOperator(OperatorABC):
+    """Adapt DataFlow conversation records to DataForge's message contract."""
+
+    def run(
+        self,
+        storage: DataFlowStorage,
+        source_field: str = "conversation",
+        target_field: str = "messages",
+    ) -> list[str]:
+        dataframe = storage.read("dataframe")
+        if source_field not in dataframe.columns:
+            raise ValueError(f"Missing input column: {source_field}")
+
+        def adapt(value):
+            if not isinstance(value, list):
+                raise ValueError(f"Invalid conversation value: {type(value).__name__}")
+            messages = []
+            for turn in value:
+                if not isinstance(turn, dict):
+                    continue
+                role = str(turn.get("role") or "user")
+                content = turn.get("content", turn.get("value"))
+                if content is None:
+                    continue
+                messages.append({"role": role, "content": str(content)})
+            if not messages:
+                raise ValueError("Conversation does not contain usable turns")
+            return messages
+
+        dataframe[target_field] = dataframe[source_field].map(adapt)
+        dataframe["turn_count"] = dataframe[target_field].map(len)
+        dataframe["dialogue_id"] = dataframe[target_field].map(
+            lambda messages: "dlg_"
+            + hashlib.sha256(
+                json.dumps(messages, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest()[:24]
+        )
+        storage.write(dataframe)
+        return [target_field, "turn_count", "dialogue_id"]
 
 
 class MedicalDocumentPipeline(PipelineABC):

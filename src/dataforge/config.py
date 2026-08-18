@@ -10,6 +10,10 @@ class Settings:
     project_root: Path
     state_dir: Path
     dataflow_path: Path | None
+    mineru_mode: str = "auto"
+    mineru_command: str = "mineru"
+    mineru_backend: str = "hybrid-auto-engine"
+    mineru_probe_timeout_seconds: float = 5.0
 
     @classmethod
     def load(
@@ -27,7 +31,30 @@ class Settings:
             conventional = root.parent / "DataFlow"
             resolved_dataflow = conventional.resolve() if conventional.exists() else None
 
-        return cls(project_root=root, state_dir=state, dataflow_path=resolved_dataflow)
+        mineru_mode = (os.getenv("DATAFORGE_MINERU_MODE") or "auto").strip().lower()
+        if mineru_mode not in {"auto", "disabled"}:
+            raise ValueError("DATAFORGE_MINERU_MODE must be 'auto' or 'disabled'")
+
+        try:
+            mineru_probe_timeout = float(
+                os.getenv("DATAFORGE_MINERU_PROBE_TIMEOUT_SECONDS") or "5"
+            )
+        except ValueError as exc:
+            raise ValueError("DATAFORGE_MINERU_PROBE_TIMEOUT_SECONDS must be a number") from exc
+        if mineru_probe_timeout <= 0:
+            raise ValueError("DATAFORGE_MINERU_PROBE_TIMEOUT_SECONDS must be greater than 0")
+
+        return cls(
+            project_root=root,
+            state_dir=state,
+            dataflow_path=resolved_dataflow,
+            mineru_mode=mineru_mode,
+            mineru_command=(os.getenv("DATAFORGE_MINERU_COMMAND") or "mineru").strip(),
+            mineru_backend=(
+                os.getenv("DATAFORGE_MINERU_BACKEND") or "hybrid-auto-engine"
+            ).strip(),
+            mineru_probe_timeout_seconds=mineru_probe_timeout,
+        )
 
     @property
     def database_path(self) -> Path:

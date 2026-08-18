@@ -3,8 +3,8 @@
         <VueFlow class="main-flow" :id="id" v-model:nodes="thisNodes" v-model:edges="thisEdges" @dragover="dragOver"
             @drop="drop" @dragleave="dragLeave" @connect="$emit('connect', $event)"
             @connect-end="$emit('connect-end', $event)" @connect-start="$emit('connect-start', $event)">
-            <Background variant="dots" gap="20" size="3" :color="'rgba(200, 200, 200, 0.3)'" :style="{
-                backgroundColor: isDragOver ? 'rgba(87, 99, 206, 0.05)' : 'transparent',
+            <Background variant="dots" gap="20" size="3" :color="theme === 'dark' ? 'rgba(103, 180, 236, 0.16)' : 'rgba(200, 200, 200, 0.3)'" :style="{
+                backgroundColor: isDragOver ? 'rgba(58, 154, 232, 0.08)' : 'transparent',
                 transition: 'background-color 0.2s ease'
             }"></Background>
             <template #node-base-node="nodeProps">

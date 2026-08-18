@@ -93,12 +93,13 @@ export default {
         ...mapActions(useTheme, ['reviseTheme']),
         getConfig() {
             this.$api.preferences.get_preferences_api_v1_preferences__get().then(res => {
-                if (res.code === 200) {
-                    if (res.data.language) {
-                        this.reviseLanguage(res.data.language)
+                const preferences = res?.data
+                if (res?.code === 200 && preferences) {
+                    if (preferences.language) {
+                        this.reviseLanguage(preferences.language)
                     }
-                    if (res.data.theme) {
-                        this.reviseTheme(res.data.theme)
+                    if (preferences.theme) {
+                        this.reviseTheme(preferences.theme)
                     }
                 }
             })

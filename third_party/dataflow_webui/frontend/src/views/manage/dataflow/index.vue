@@ -1,5 +1,5 @@
 <template>
-    <div class="df-default-container" :class="[{ dark: theme === 'dark', 'show-pipeline': show.pipeline, 'show-chat': show.chat }]">
+    <div class="df-default-container" :class="[{ dark: theme === 'dark', embedded: isEmbedded, 'show-pipeline': show.pipeline, 'show-chat': show.chat }]">
         <pipeline v-model="show.pipeline" v-model:loading="lock.loading" v-model:pipeline="currentPipeline"
             :flow-id="flowId" class="df-pipeline-container" @confirm-dataset="confirmDataset($event, true)"
             @select-pipeline="selectPipelineCallback"></pipeline>
@@ -67,7 +67,7 @@
                                 :title="local('Delete')" style="width: 30px; height: 30px" @click="resetFlow">
                                 <i class="ms-Icon ms-Icon--Delete"></i>
                             </fv-button>
-                            <fv-button
+                            <fv-button v-if="!isEmbedded"
                                 :theme="show.chat ? 'dark' : theme"
                                 :background="show.chat ? 'linear-gradient(90deg, rgba(69, 98, 213, 1), rgba(161, 145, 206, 1))' : ''"
                                 :foreground="show.chat ? 'rgba(255, 255, 255, 1)' : ''"
@@ -189,6 +189,7 @@ export default {
     },
     data() {
         return {
+            isEmbedded: new URLSearchParams(window.location.search).get('embedded') === '1' || window.self !== window.top,
             flowId: 'df-main-flow',
             value: null,
             options: [
@@ -284,6 +285,7 @@ export default {
             handler(newVal, oldVal) {
                 if (newVal !== oldVal) {
                     this.updateDatabaseNode()
+                    this.postStudioState()
                 }
             },
             deep: true
@@ -291,6 +293,19 @@ export default {
         currentPipeline() {
             this.getTasks()
             this.clearExecution()
+            this.postStudioState()
+        },
+        nodes: {
+            deep: true,
+            handler() {
+                this.postStudioState()
+            }
+        },
+        execution: {
+            deep: true,
+            handler() {
+                this.postStudioState()
+            }
         },
         isAutoConnection(val) {
             if (val) {
@@ -394,6 +409,8 @@ export default {
         this.setViewport()
         this.getServing()
         this.getPromptInfo()
+        this.postStudioMessage('ready')
+        this.$nextTick(() => this.postStudioState())
     },
     beforeUnmount() {
         // 兜底清理拖拽监听，避免组件销毁后仍挂在 window 上
@@ -420,6 +437,28 @@ export default {
                 x: 0,
                 y: 0,
                 zoom: 1
+            })
+        },
+        postStudioMessage(type, payload = {}) {
+            if (!this.isEmbedded || window.parent === window) return
+            window.parent.postMessage({ source: 'dataflow-studio', type, payload }, window.location.origin)
+        },
+        postStudioState() {
+            const pipeline = this.currentPipeline
+            const tags = Array.isArray(pipeline?.tags) ? pipeline.tags : []
+            const status = this.execution?.status || (this.executionInfo.task_id && !this.lock.running ? 'running' : null)
+            this.postStudioMessage('state', {
+                pipeline: pipeline ? {
+                    id: pipeline.id,
+                    name: pipeline.name,
+                    is_template: tags.includes('template')
+                } : null,
+                operator_count: this.nodes.filter(node => node.type !== 'database-node').length,
+                dataset_name: this.sourceDatabase?.name || '',
+                execution: this.executionInfo.task_id ? {
+                    task_id: this.executionInfo.task_id,
+                    status
+                } : null
             })
         },
         updateDatabaseNode() {
@@ -957,18 +996,64 @@ export default {
     background-color: rgba(241, 241, 241, 1);
     display: flex;
 
-    &.dark {
-        background: rgba(36, 36, 36, 1);
+    &.embedded {
+        padding: 0;
+        background:
+            radial-gradient(ellipse at 76% 4%, rgba(53, 163, 232, 0.13), transparent 32%),
+            radial-gradient(ellipse at 18% 80%, rgba(32, 99, 158, 0.07), transparent 30%),
+            linear-gradient(145deg, #07111d, #081522 52%, #050b13);
+
+        .df-pipeline-container {
+            top: 0;
+            height: 100%;
+            border-radius: 0;
+            border-right: 1px solid rgba(189, 222, 248, 0.12);
+            background: rgba(8, 18, 30, 0.78);
+            box-shadow: inset -1px 0 0 rgba(255, 255, 255, .025), 16px 0 42px rgba(0, 5, 14, 0.22);
+            backdrop-filter: blur(30px) saturate(118%);
+        }
 
         .df-flow-container {
-            background: rgba(30, 30, 30, 1);
-            border: rgba(90, 90, 90, 0.1) solid thin;
+            border: 1px solid rgba(189, 222, 248, 0.12);
+            border-radius: 0;
+            background:
+                radial-gradient(ellipse at 74% 8%, rgba(68, 172, 235, 0.1), transparent 34%),
+                rgba(6, 15, 25, 0.88);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+        }
+
+        .control-menu-block {
+            justify-content: flex-start;
+            padding: 14px 154px 14px 18px;
+
+            .command-bar {
+                width: 100%;
+                max-width: none;
+                border-color: rgba(207, 235, 255, 0.22);
+                background: rgba(18, 34, 52, 0.62) !important;
+                box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 16px 40px rgba(0, 5, 14, 0.32), 0 0 28px rgba(58, 169, 255, 0.08);
+                backdrop-filter: blur(30px) saturate(120%);
+            }
+        }
+    }
+
+    &.dark {
+        color: rgba(232, 242, 252, 1);
+        background:
+            radial-gradient(ellipse at 76% 4%, rgba(53, 163, 232, 0.13), transparent 32%),
+            linear-gradient(145deg, #07111d, #081522 52%, #050b13);
+
+        .df-flow-container {
+            background:
+                radial-gradient(ellipse at 74% 8%, rgba(68, 172, 235, 0.1), transparent 34%),
+                rgba(6, 15, 25, 0.88);
+            border: rgba(189, 222, 248, 0.12) solid thin;
         }
 
         .control-menu-block {
             .command-bar {
                 .option-name {
-                    color: whitesmoke;
+                    color: rgba(211, 226, 240, 1) !important;
                 }
             }
         }
