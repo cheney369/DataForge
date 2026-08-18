@@ -2,172 +2,256 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Medical AI Data Foundation",
-    "subtitle": "统一数据生产 → 统一数据资产 → 统一知识消费",
+    "title": "DataForge Architecture",
+    "subtitle": "Configuration-driven knowledge production and application delivery",
     "output": "dataforge-architecture.html",
-    "quality_profile": "standard"
+    "visual_preset": "classic",
+    "animation": "none",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "production-path",
+        "label": "Knowledge production",
+        "focus": ["users", "console", "api", "dataflow", "assets"],
+        "note": "Follow source data from configuration and processing to versioned knowledge assets."
+      },
+      {
+        "id": "delivery-path",
+        "label": "Application delivery",
+        "focus": ["assets", "retrieval", "applications"],
+        "note": "Published retrieval and application configurations expose stable contracts to downstream software."
+      },
+      {
+        "id": "runtime-resources",
+        "label": "Runtime resources",
+        "focus": ["dataflow", "models", "retrieval", "milvus", "graph"],
+        "note": "OpenAI-compatible model services and pluggable stores remain environment configuration."
+      }
+    ]
   },
   "components": [
     {
-      "id": "data_sources",
+      "id": "users",
       "type": "external",
-      "label": "Data Sources",
-      "sublabel": "PDF / DB / API / HIS / EMR",
-      "pos": [40, 300],
-      "size": [160, 68]
+      "label": "Operators",
+      "sublabel": "business + engineering",
+      "pos": [36, 300],
+      "size": [126, 62]
     },
     {
-      "id": "source_center",
-      "type": "cloud",
-      "label": "Source Center",
-      "sublabel": "来源 / 数据集 / 版本",
-      "pos": [260, 300],
-      "size": [160, 68]
-    },
-    {
-      "id": "data_factory",
-      "type": "backend",
-      "label": "Data Factory",
-      "sublabel": "Pipeline / Workflow",
-      "tag": "一期核心",
-      "pos": [480, 300],
-      "size": [160, 68]
-    },
-    {
-      "id": "asset_center",
-      "type": "database",
-      "label": "Asset Center",
-      "sublabel": "Document / FAQ / Chunk / Entity",
-      "pos": [700, 300],
-      "size": [180, 68]
-    },
-    {
-      "id": "knowledge_runtime",
-      "type": "backend",
-      "label": "Knowledge Runtime",
-      "sublabel": "Retrieval / Search / Citation",
-      "tag": "Phase 2",
-      "pos": [1010, 300],
-      "size": [180, 68]
-    },
-    {
-      "id": "ai_applications",
+      "id": "console",
       "type": "frontend",
-      "label": "AI Applications",
-      "sublabel": "FAQ / 导诊 / Agent / Workflow",
-      "tag": "Phase 3",
-      "pos": [1260, 300],
-      "size": [180, 68]
+      "label": "Web Console",
+      "sublabel": "Vue 3 workspace",
+      "pos": [222, 300],
+      "size": [136, 62]
     },
     {
-      "id": "dataflow_engine",
-      "type": "messagebus",
-      "label": "Processing Engine",
-      "sublabel": "DataFlow（当前实现，可替换）",
-      "pos": [470, 500],
-      "size": [180, 68]
-    },
-    {
-      "id": "medical_operators",
+      "id": "api",
       "type": "backend",
-      "label": "Medical Operators",
-      "sublabel": "OCR / ICD / 实体识别 / 标准化",
-      "pos": [720, 500],
-      "size": [190, 68]
+      "label": "DataForge API",
+      "sublabel": "FastAPI services",
+      "pos": [422, 300],
+      "size": [140, 62]
+    },
+    {
+      "id": "dataflow",
+      "type": "messagebus",
+      "label": "DataFlow Engine",
+      "sublabel": "operators + pipelines",
+      "pos": [626, 300],
+      "size": [146, 62]
+    },
+    {
+      "id": "assets",
+      "type": "database",
+      "label": "Knowledge Assets",
+      "sublabel": "records + lineage",
+      "pos": [838, 300],
+      "size": [146, 62]
+    },
+    {
+      "id": "retrieval",
+      "type": "backend",
+      "label": "Retrieval & Delivery",
+      "sublabel": "indexes + configurations",
+      "pos": [1050, 300],
+      "size": [156, 62]
+    },
+    {
+      "id": "applications",
+      "type": "external",
+      "label": "Applications",
+      "sublabel": "stable app_key contract",
+      "pos": [1272, 300],
+      "size": [150, 62]
+    },
+    {
+      "id": "models",
+      "type": "cloud",
+      "label": "Model Services",
+      "sublabel": "LLM + Embedding + Reranker",
+      "pos": [609, 112],
+      "size": [180, 64],
+      "tag": "OpenAI compatible"
+    },
+    {
+      "id": "metadata",
+      "type": "database",
+      "label": "Metadata & Blobs",
+      "sublabel": "SQLite + local storage",
+      "pos": [417, 492],
+      "size": [150, 64]
+    },
+    {
+      "id": "milvus",
+      "type": "database",
+      "label": "Milvus",
+      "sublabel": "vector indexes",
+      "pos": [1059, 492],
+      "size": [138, 64]
+    },
+    {
+      "id": "graph",
+      "type": "database",
+      "label": "Neo4j",
+      "sublabel": "optional graph indexes",
+      "pos": [1216, 492],
+      "size": [146, 64],
+      "tag": "optional"
     }
   ],
   "boundaries": [
     {
       "kind": "region",
-      "label": "Phase 1 / Unified Data Production",
-      "wraps": [
-        "source_center",
-        "data_factory",
-        "asset_center",
-        "dataflow_engine",
-        "medical_operators"
-      ]
-    },
-    {
-      "kind": "region",
-      "label": "Phase 2–3 / Knowledge Consumption",
-      "wraps": ["knowledge_runtime", "ai_applications"]
+      "label": "DataForge platform",
+      "wraps": ["console", "api", "dataflow", "assets", "retrieval", "metadata"]
     }
   ],
   "connections": [
     {
-      "id": "sources-to-source-center",
-      "from": "data_sources",
-      "to": "source_center",
-      "label": "ingest",
+      "id": "users-console",
+      "from": "users",
+      "to": "console",
+      "label": "configure",
       "variant": "emphasis",
       "route": "straight"
     },
     {
-      "id": "source-center-to-factory",
-      "from": "source_center",
-      "to": "data_factory",
+      "id": "console-api",
+      "from": "console",
+      "to": "api",
       "variant": "emphasis",
       "route": "straight"
     },
     {
-      "id": "factory-to-assets",
-      "from": "data_factory",
-      "to": "asset_center",
+      "id": "api-dataflow",
+      "from": "api",
+      "to": "dataflow",
+      "label": "run",
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "id": "dataflow-assets",
+      "from": "dataflow",
+      "to": "assets",
       "label": "publish",
       "variant": "emphasis",
       "route": "straight"
     },
     {
-      "id": "assets-to-runtime",
-      "from": "asset_center",
-      "to": "knowledge_runtime",
-      "label": "Phase 2",
-      "variant": "dashed",
+      "id": "assets-retrieval",
+      "from": "assets",
+      "to": "retrieval",
+      "variant": "emphasis",
       "route": "straight"
     },
     {
-      "id": "runtime-to-apps",
-      "from": "knowledge_runtime",
-      "to": "ai_applications",
-      "label": "knowledge APIs",
-      "variant": "dashed",
-      "route": "straight",
-      "labelAt": [1225, 296]
+      "id": "retrieval-apps",
+      "from": "retrieval",
+      "to": "applications",
+      "label": "stable API",
+      "variant": "emphasis",
+      "route": "straight"
     },
     {
-      "id": "factory-to-engine",
-      "from": "data_factory",
-      "to": "dataflow_engine",
-      "label": "engine adapter",
+      "id": "api-metadata",
+      "from": "api",
+      "to": "metadata",
+      "label": "versioned state",
       "fromSide": "bottom",
       "toSide": "top",
-      "route": "straight",
-      "labelAt": [565, 382]
+      "route": "orthogonal-v",
+      "labelDy": 62
     },
     {
-      "id": "engine-to-operators",
-      "from": "dataflow_engine",
-      "to": "medical_operators",
-      "label": "executes",
-      "route": "straight"
+      "id": "dataflow-models",
+      "from": "dataflow",
+      "to": "models",
+      "label": "generation",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "orthogonal-v",
+      "labelAt": [699, 226]
+    },
+    {
+      "id": "retrieval-models",
+      "from": "retrieval",
+      "to": "models",
+      "label": "embed + rerank",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "right",
+      "via": [[1128, 238], [930, 238], [930, 144]],
+      "labelAt": [1028, 226]
+    },
+    {
+      "id": "retrieval-milvus",
+      "from": "retrieval",
+      "to": "milvus",
+      "label": "vectors",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-v",
+      "labelDy": 62
+    },
+    {
+      "id": "retrieval-graph",
+      "from": "retrieval",
+      "to": "graph",
+      "label": "graphs",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "orthogonal-h",
+      "labelAt": [1248, 420]
     }
   ],
   "cards": [
     {
       "dot": "cyan",
-      "title": "一期范围",
+      "title": "Configuration first",
       "items": [
-        "统一接入、加工、资产沉淀、治理与发布",
-        "不改造现有业务，不建设统一 Runtime"
+        "Knowledge schemas, pipelines, indexes and retrieval policies are managed in the console",
+        "Business applications consume stable published contracts"
       ]
     },
     {
       "dot": "emerald",
-      "title": "架构原则",
+      "title": "Versioned and traceable",
       "items": [
-        "面向数据资产，而不是面向具体业务",
-        "Processing Engine 保持抽象，DataFlow 只是当前实现"
+        "Source versions, pipeline snapshots and knowledge records remain traceable",
+        "Published collections and application configurations are immutable"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Pluggable runtime",
+      "items": [
+        "OpenAI-compatible model endpoints stay environment-specific",
+        "Milvus is the default vector store; graph storage is optional"
       ]
     }
   ]
